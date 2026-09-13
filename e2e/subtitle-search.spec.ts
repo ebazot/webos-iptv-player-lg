@@ -148,7 +148,7 @@ test('"Search online…" opens the results overlay, ranked and provider-labeled'
   await expect(rows.nth(1)).toContainText('Rare Release');
 });
 
-test('picking a result downloads it and shows it as a native subtitle track', async ({ page }) => {
+test('picking a result downloads it into the application subtitle track', async ({ page }) => {
   await seedVod(page);
   await routeAssrtSearch(page, () => [
     assrtSub({ id: '201', langDesc: '英', name: 'Popular Release', downloads: 100 }),
@@ -162,14 +162,14 @@ test('picking a result downloads it and shows it as a native subtitle track', as
   await page.keyboard.press('Enter');
 
   // The pick applies: a toast, the overlay closes, and the downloaded subtitle
-  // becomes the showing native text track.
+  // becomes the showing application-created text track with parsed cues.
   await expect(page.locator('.toast')).toContainText('Subtitles: Popular Release');
   await expect(page.locator('#subtitle-search .subs-overlay')).toBeHidden();
   await expect.poll(async () => page.evaluate(() => {
     const v = document.getElementById('video-player') as HTMLVideoElement;
     const t = Array.from(v.textTracks).find((x) => x.mode === 'showing');
-    return t ? t.label : null;
-  })).toBe('Popular Release');
+    return t ? { label: t.label, cues: t.cues?.length ?? 0 } : null;
+  })).toEqual({ label: 'Popular Release', cues: 2 });
 });
 
 test('an empty search keeps the box open for a manual retry that finds results', async ({ page }) => {

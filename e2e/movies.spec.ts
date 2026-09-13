@@ -180,7 +180,7 @@ test('VOD playback suppresses the live channel sidebar and shows a VOD-only menu
   expect(await menu.textContent()).not.toContain('Playing:');
 });
 
-test('a VOD sidecar subtitle attaches as a native text track and loads its cues when selected', async ({ page }) => {
+test('a VOD sidecar subtitle creates its application track when selected', async ({ page }) => {
   await seedMovies(page, { subtitles: true });
   await routeLiveManifest(page);
   // Keep VOD alive so the neutered <video> doesn't eject before we probe tracks.
@@ -199,13 +199,13 @@ test('a VOD sidecar subtitle attaches as a native text track and loads its cues 
   await expect(page.locator('#view-player')).toBeVisible();
   await expect(page.locator('#player-osd .osd-channel-name')).toBeVisible();
 
-  // The sidecar becomes a real subtitles text track on the <video>, off by default.
-  const attached = await page.evaluate(() => {
+  // Sidecars are synthetic picker entries, so the reusable renderer track is
+  // not created until the first selection.
+  const initialTrackCount = await page.evaluate(() => {
     const v = document.getElementById('video-player') as HTMLVideoElement;
-    const t = v.textTracks[0];
-    return t ? { count: v.textTracks.length, label: t.label, kind: t.kind, mode: t.mode } : null;
+    return v.textTracks.length;
   });
-  expect(attached).toEqual({ count: 1, label: 'Track 1', kind: 'subtitles', mode: 'disabled' });
+  expect(initialTrackCount).toBe(0);
 
   // Open the right-edge menu into the Subtitles sub-menu; the sidecar is listed.
   await page.mouse.move(1900, 540);
@@ -221,8 +221,10 @@ test('a VOD sidecar subtitle attaches as a native text track and loads its cues 
   await page.keyboard.press('Enter');
   await expect.poll(async () => page.evaluate(() => {
     const t = (document.getElementById('video-player') as HTMLVideoElement).textTracks[0];
-    return t.mode === 'showing' && t.cues ? t.cues.length : 0;
-  })).toBe(2);
+    return t && t.mode === 'showing' && t.cues
+      ? { count: t.cues.length, label: t.label }
+      : null;
+  })).toEqual({ count: 2, label: 'Track 1' });
 });
 
 test('a VOD ASS sidecar renders through the assjs overlay when selected', async ({ page }) => {

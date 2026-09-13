@@ -4,7 +4,11 @@ import type { Channel, VodPlayback } from '../types';
 import { channelKey, legacyChannelKey } from '../utils/channel';
 import { StorageService } from '../services/storage-service';
 import type { PlayerPipeline } from './player-pipeline';
-import { ASS_SUBTITLE_BASE, PlayerTracks } from './player-tracks';
+import {
+  ASS_SUBTITLE_BASE,
+  PlayerTracks,
+  VOD_SUBTITLE_BASE,
+} from './player-tracks';
 
 const { subtitleSearchServiceMock } = vi.hoisted(() => {
   let available = false;
@@ -598,35 +602,144 @@ describe('PlayerTracks', () => {
       );
     });
 
-    it('lazily loads a sidecar track when it is shown', () => {
-      const text = [nativeTextTrack('disabled', { label: 'Track 1' })];
-      setup({ text });
+    it('routes a sidecar pick to the reusable VOD renderer', () => {
+      setup();
       const vodSubs = {
         attach: vi.fn(),
-        ensureLoaded: vi.fn(),
+        show: vi.fn(),
+        hide: vi.fn(),
         clear: vi.fn(),
         setOffset: vi.fn(),
         owns: vi.fn(() => false),
+        activeIndex: -1,
       };
-      trackInternals(tracks).vodSubs = vodSubs;
-      tracks.selectSubtitleTrack(0);
-      expect(text[0].mode).toBe('showing');
-      expect(vodSubs.ensureLoaded).toHaveBeenCalledWith(text[0]);
+      const internals = trackInternals(tracks);
+      internals.vodSubs = vodSubs;
+      internals.vodTextSidecars = [{
+        id: '1',
+        name: 'Track 1',
+        lang: 'l1',
+        url: 'http://host/a.srt',
+      }];
+
+      tracks.selectSubtitleTrack(VOD_SUBTITLE_BASE);
+
+      expect(vodSubs.show).toHaveBeenCalledWith(0);
+      expect(vodSubs.hide).not.toHaveBeenCalled();
     });
 
-    it('does not load anything when subtitles are turned off', () => {
+    it('lists a sidecar once and hides its renderer track from the picker', () => {
+      const renderer = nativeTextTrack('showing', { label: 'Renderer' });
+      setup({ text: [renderer] });
+      const internals = trackInternals(tracks);
+      internals.vodTextSidecars = [{
+        id: '1',
+        name: 'Track 1',
+        lang: 'l1',
+        url: 'http://host/a.srt',
+      }];
+      internals.vodSubs = {
+        activeIndex: 0,
+        owns: vi.fn((track: TextTrack) => track === renderer),
+      };
+
+      expect(tracks.getSubtitleTracks()).toEqual([{
+        index: VOD_SUBTITLE_BASE,
+        label: 'Track 1',
+        active: true,
+        available: true,
+      }]);
+    });
+
+    it('uses the generic subtitle label for an unnamed sidecar', () => {
+      setup();
+      const internals = trackInternals(tracks);
+      internals.vodTextSidecars = [{
+        id: '1',
+        name: '',
+        lang: '',
+        url: 'http://host/a.srt',
+      }];
+      internals.vodSubs = {
+        activeIndex: -1,
+        owns: vi.fn(() => false),
+      };
+
+      expect(tracks.getSubtitleTracks()[0].label).toBe('Subtitles');
+    });
+
+    it('uses the language as the label when a sidecar has no name', () => {
+      setup();
+      const internals = trackInternals(tracks);
+      internals.vodTextSidecars = [{
+        id: '1',
+        name: '',
+        lang: 'l1',
+        url: 'http://host/a.srt',
+      }];
+      internals.vodSubs = {
+        activeIndex: -1,
+        owns: vi.fn(() => false),
+      };
+
+      expect(tracks.getSubtitleTracks()[0].label).toBe('l1');
+    });
+
+    it('hides the sidecar renderer before selecting a native track', () => {
+      const text = [nativeTextTrack('disabled', { label: 'Track 1' })];
+      setup({ text });
+      const vodSubs = {
+        activeIndex: 0,
+        hide: vi.fn(),
+        owns: vi.fn(() => false),
+        setOffset: vi.fn(),
+      };
+      trackInternals(tracks).vodSubs = vodSubs;
+
+      tracks.selectSubtitleTrack(0);
+
+      expect(vodSubs.hide).toHaveBeenCalled();
+      expect(text[0].mode).toBe('showing');
+    });
+
+    it('ignores addtrack reapplication while a sidecar is active', () => {
+      const text = [nativeTextTrack('disabled', { label: 'Renderer' })];
+      setup({ text });
+      const vodSubs = {
+        activeIndex: 0,
+        hide: vi.fn(),
+        owns: vi.fn(() => true),
+        setOffset: vi.fn(),
+      };
+      trackInternals(tracks).vodSubs = vodSubs;
+      vi.mocked(StorageService.getSubtitlePref).mockReturnValue({
+        off: false,
+        name: 'Track 1',
+        lang: 'l1',
+      });
+
+      tracks.applyNativeSubtitleSelection();
+
+      expect(vodSubs.hide).not.toHaveBeenCalled();
+      expect(text[0].mode).toBe('disabled');
+    });
+
+    it('hides the sidecar renderer when subtitles are turned off', () => {
       const text = [nativeTextTrack('showing', { label: 'Track 1' })];
       setup({ text });
       const vodSubs = {
         attach: vi.fn(),
-        ensureLoaded: vi.fn(),
+        show: vi.fn(),
+        hide: vi.fn(),
         clear: vi.fn(),
         setOffset: vi.fn(),
         owns: vi.fn(() => false),
+        activeIndex: -1,
       };
       trackInternals(tracks).vodSubs = vodSubs;
       tracks.selectSubtitleTrack(-1);
-      expect(vodSubs.ensureLoaded).not.toHaveBeenCalled();
+      expect(vodSubs.hide).toHaveBeenCalled();
+      expect(vodSubs.show).not.toHaveBeenCalled();
     });
 
     it('re-applies a saved subtitle pick when tracks arrive', () => {
@@ -945,19 +1058,12 @@ describe('PlayerTracks', () => {
       const textTracks: unknown[] = [];
       video = { textTracks } as unknown as HTMLVideoElement;
       const vodSubs = {
-        addOnline: vi.fn((_: unknown, sub: { name: string; lang: string }) => {
-          const track = {
-            mode: 'showing' as TextTrackMode,
-            kind: 'subtitles',
-            label: sub.name,
-            language: sub.lang,
-          };
-          textTracks.push(track);
-          return track;
-        }),
-        ensureLoaded: vi.fn(),
+        addOnline: vi.fn(() => 0),
+        show: vi.fn(),
+        hide: vi.fn(),
         setOffset: vi.fn(),
         owns: vi.fn(() => false),
+        activeIndex: 0,
       };
       trackInternals(tracks).vodSubs = vodSubs;
 
@@ -994,9 +1100,11 @@ describe('PlayerTracks', () => {
       const addOnline = vi.fn();
       trackInternals(tracks).vodSubs = {
         addOnline,
-        ensureLoaded: vi.fn(),
+        show: vi.fn(),
+        hide: vi.fn(),
         setOffset: vi.fn(),
         owns: vi.fn(() => false),
+        activeIndex: -1,
       };
       let resolveDownload: (value: { text: string; format: 'srt' }) => void =
         () => {};
@@ -1032,22 +1140,15 @@ describe('PlayerTracks', () => {
         url: 'http://host/vod.mp4',
       });
       vod = activeVod;
-      const textTracks: unknown[] = [];
-      video = { textTracks } as unknown as HTMLVideoElement;
-      const addOnline = vi.fn((_: unknown, sub: { name: string; lang: string }) => {
-        const track = {
-          mode: 'disabled' as TextTrackMode,
-          kind: 'subtitles',
-          label: sub.name,
-          language: sub.lang,
-        };
-        textTracks.push(track);
-        return track;
-      });
+      video = { textTracks: [] } as unknown as HTMLVideoElement;
+      const addOnline = vi.fn(() => 0);
       trackInternals(tracks).vodSubs = {
         addOnline,
+        show: vi.fn(),
+        hide: vi.fn(),
         setOffset: vi.fn(),
         owns: vi.fn(() => false),
+        activeIndex: -1,
       };
       // Seed the pick + cache-hit for exactly this restore; `Once` + reset
       // keeps these mocks from leaking into later VOD tests. Clear `download`'s
@@ -1134,7 +1235,7 @@ describe('PlayerTracks', () => {
     });
   });
 
-  it('owns track-engine reset, suspend, and stop lifecycle', () => {
+  it('clears VOD subtitle state on a new load and stop', () => {
     const subs = { stop: vi.fn() };
     const vodSubs = { clear: vi.fn() };
     const assSubs = { destroy: vi.fn() };
@@ -1142,12 +1243,14 @@ describe('PlayerTracks', () => {
       subs: typeof subs;
       vodSubs: typeof vodSubs;
       assSubs: typeof assSubs;
+      vodTextSidecars: unknown[];
       vodAssSidecars: unknown[];
       activeAssIndex: number;
     };
     internals.subs = subs;
     internals.vodSubs = vodSubs;
     internals.assSubs = assSubs;
+    internals.vodTextSidecars = [{}];
     internals.vodAssSidecars = [{}];
     internals.activeAssIndex = 0;
 
@@ -1156,8 +1259,9 @@ describe('PlayerTracks', () => {
     tracks.stop();
 
     expect(subs.stop).toHaveBeenCalledTimes(3);
-    expect(vodSubs.clear).toHaveBeenCalledOnce();
-    expect(assSubs.destroy).toHaveBeenCalledOnce();
+    expect(vodSubs.clear).toHaveBeenCalledTimes(2);
+    expect(assSubs.destroy).toHaveBeenCalledTimes(2);
+    expect(internals.vodTextSidecars).toEqual([]);
     expect(internals.vodAssSidecars).toEqual([]);
     expect(internals.activeAssIndex).toBe(-1);
   });

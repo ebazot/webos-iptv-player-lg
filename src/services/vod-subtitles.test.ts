@@ -1,136 +1,260 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { fetchTextMock } = vi.hoisted(() => ({ fetchTextMock: vi.fn() }));
 vi.mock('../utils/fetch-helper', () => ({ fetchText: fetchTextMock }));
 
+import type { SidecarSubtitle } from '../types';
 import { VodSubtitles } from './vod-subtitles';
 
-// jsdom exposes neither VTTCue nor <track>.track, so the DOM-building `attach`
-// is covered by e2e; here we exercise `ensureLoaded`'s load/parse/guard logic by
-// stubbing VTTCue and seeding the private entries (the private-injection pattern
-// used across these tests). A cue captures its constructor args for assertions.
 class FakeVTTCue {
-  constructor(public startTime: number, public endTime: number, public text: string) {}
+  line?: number;
+  align?: string;
+
+  constructor(
+    public startTime: number,
+    public endTime: number,
+    public text: string,
+  ) {}
 }
 
-interface FakeTrack { cues: FakeVTTCue[]; addCue(c: FakeVTTCue): void }
-const makeTrack = (): FakeTrack => ({ cues: [], addCue(c) { this.cues.push(c); } });
+function fakeTrack() {
+  const cues: FakeVTTCue[] = [];
+  return {
+    kind: 'subtitles',
+    mode: 'disabled' as TextTrackMode,
+    cues,
+    addCue: (cue: FakeVTTCue) => cues.push(cue),
+    removeCue: (cue: FakeVTTCue) => {
+      const index = cues.indexOf(cue);
+      if (index >= 0) cues.splice(index, 1);
+    },
+  };
+}
 
-type Entry = { track: FakeTrack; url: string; loaded: boolean };
-const seed = (subs: VodSubtitles, entries: Entry[], gen = 1) => {
-  (subs as unknown as { entries: Entry[]; gen: number }).entries = entries;
-  (subs as unknown as { entries: Entry[]; gen: number }).gen = gen;
-};
-const entriesOf = (subs: VodSubtitles) => (subs as unknown as { entries: Entry[] }).entries;
-const genOf = (subs: VodSubtitles) => (subs as unknown as { gen: number }).gen;
+function sidecar(over: Partial<SidecarSubtitle> = {}): SidecarSubtitle {
+  return {
+    id: over.id ?? '1',
+    name: over.name ?? 'Track 1',
+    lang: over.lang ?? 'l1',
+    url: over.url ?? 'http://host/a.srt',
+    text: over.text,
+  };
+}
 
 let subs: VodSubtitles;
-let track: FakeTrack;
+let track: ReturnType<typeof fakeTrack>;
+let addTextTrack: ReturnType<typeof vi.fn>;
+let video: HTMLVideoElement;
 
 beforeEach(() => {
   vi.stubGlobal('VTTCue', FakeVTTCue);
   fetchTextMock.mockReset();
+  track = fakeTrack();
+  addTextTrack = vi.fn(() => track);
+  video = { addTextTrack } as unknown as HTMLVideoElement;
   subs = new VodSubtitles();
-  track = makeTrack();
-});
-afterEach(() => vi.unstubAllGlobals());
-
-describe('VodSubtitles.ensureLoaded', () => {
-  it('fetches, converts an SRT sidecar and adds its cues to the track', async () => {
-    seed(subs, [{ track, url: 'http://host/a.srt', loaded: false }]);
-    fetchTextMock.mockResolvedValue('1\n00:00:01,000 --> 00:00:02,500\nHi\n');
-    await subs.ensureLoaded(track as unknown as TextTrack);
-    expect(track.cues).toEqual([{ startTime: 1, endTime: 2.5, text: 'Hi' }]);
-  });
-
-  it('adds cues from a WebVTT sidecar directly', async () => {
-    seed(subs, [{ track, url: 'http://host/a.vtt', loaded: false }]);
-    fetchTextMock.mockResolvedValue('WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHi\n');
-    await subs.ensureLoaded(track as unknown as TextTrack);
-    expect(track.cues).toEqual([{ startTime: 1, endTime: 2, text: 'Hi' }]);
-  });
-
-  it('loads each track only once (repeat shows do not refetch)', async () => {
-    seed(subs, [{ track, url: 'http://host/a.vtt', loaded: false }]);
-    fetchTextMock.mockResolvedValue('WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHi\n');
-    await subs.ensureLoaded(track as unknown as TextTrack);
-    await subs.ensureLoaded(track as unknown as TextTrack);
-    expect(fetchTextMock).toHaveBeenCalledTimes(1);
-    expect(track.cues).toHaveLength(1);
-  });
-
-  it('drops cues when the generation changes mid-fetch (a new item was attached)', async () => {
-    seed(subs, [{ track, url: 'http://host/a.vtt', loaded: false }], 1);
-    fetchTextMock.mockImplementation(async () => {
-      (subs as unknown as { gen: number }).gen = 2; // simulate a re-attach during the fetch
-      return 'WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHi\n';
-    });
-    await subs.ensureLoaded(track as unknown as TextTrack);
-    expect(track.cues).toHaveLength(0);
-  });
-
-  it('resets the loaded flag on failure so a later show can retry', async () => {
-    seed(subs, [{ track, url: 'http://host/a.vtt', loaded: false }]);
-    fetchTextMock.mockRejectedValueOnce(new Error('net'));
-    await subs.ensureLoaded(track as unknown as TextTrack);
-    expect(track.cues).toHaveLength(0);
-    expect(entriesOf(subs)[0].loaded).toBe(false);
-
-    fetchTextMock.mockResolvedValueOnce('WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHi\n');
-    await subs.ensureLoaded(track as unknown as TextTrack);
-    expect(track.cues).toHaveLength(1);
-  });
-
-  it('is a no-op for a track it does not own', async () => {
-    seed(subs, [{ track, url: 'http://host/a.vtt', loaded: false }]);
-    await subs.ensureLoaded(makeTrack() as unknown as TextTrack);
-    expect(fetchTextMock).not.toHaveBeenCalled();
-  });
 });
 
-describe('VodSubtitles.clear', () => {
-  it('drops the entries and bumps the generation (cancels in-flight loads)', () => {
-    seed(subs, [{ track, url: 'http://host/a.vtt', loaded: true }], 5);
-    subs.clear();
-    expect(entriesOf(subs)).toEqual([]);
-    expect(genOf(subs)).toBe(6);
-  });
-});
+describe('VodSubtitles', () => {
+  it('renders an SRT sidecar through addTextTrack', async () => {
+    fetchTextMock.mockResolvedValue(
+      '1\n00:00:01,000 --> 00:00:02,500\nHi\n',
+    );
+    subs.attach(video, [sidecar()]);
 
-describe('VodSubtitles.addOnline (in-memory text)', () => {
-  it('uses preloaded text instead of fetching when entry.text is present', async () => {
-    const t = makeTrack();
-    seed(subs, [{ track: t, url: '', text: 'WEBVTT\n\n1\n00:00:01.000 --> 00:00:02.000\nhi\n', loaded: false } as unknown as Entry]);
-    await subs.ensureLoaded(t as unknown as TextTrack);
-    expect(fetchTextMock).not.toHaveBeenCalled();
-    expect(t.cues).toEqual([{ startTime: 1, endTime: 2, text: 'hi' }]);
-  });
-});
+    await subs.show(0);
 
-describe('VodSubtitles.setOffset', () => {
-  it('shifts cues across owned tracks by the delta (absolute)', () => {
-    const t1 = makeTrack(); const t2 = makeTrack();
-    t1.cues.push(new FakeVTTCue(1, 2, 'a'));
-    t2.cues.push(new FakeVTTCue(3, 4, 'b'));
-    seed(subs, [{ track: t1, url: '', loaded: true }, { track: t2, url: '', loaded: true }]);
-    subs.setOffset(0.5);
-    expect(t1.cues[0]).toMatchObject({ startTime: 1.5, endTime: 2.5 });
-    expect(t2.cues[0]).toMatchObject({ startTime: 3.5, endTime: 4.5 });
-    subs.setOffset(0);
-    expect(t1.cues[0]).toMatchObject({ startTime: 1, endTime: 2 });
-  });
-
-  it('bakes the current offset into lazily-loaded cues', async () => {
-    subs.setOffset(2);
-    seed(subs, [{ track, url: 'http://host/a.vtt', loaded: false }]);
-    fetchTextMock.mockResolvedValue('WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHi\n');
-    await subs.ensureLoaded(track as unknown as TextTrack);
-    expect(track.cues).toEqual([{ startTime: 3, endTime: 4, text: 'Hi' }]);
-  });
-
-  it('owns only the tracks it created', () => {
-    seed(subs, [{ track, url: '', loaded: true }]);
+    expect(addTextTrack).toHaveBeenCalledWith('subtitles', 'Track 1', 'l1');
+    expect(track.mode).toBe('showing');
+    expect(track.cues).toEqual([
+      { startTime: 1, endTime: 2.5, text: 'Hi' },
+    ]);
+    expect(subs.activeIndex).toBe(0);
     expect(subs.owns(track as unknown as TextTrack)).toBe(true);
-    expect(subs.owns(makeTrack() as unknown as TextTrack)).toBe(false);
+  });
+
+  it('uses in-memory text and preserves WebVTT cue settings', async () => {
+    subs.attach(video, [sidecar({
+      url: '',
+      text: 'WEBVTT\n\n00:00:01.000 --> 00:00:02.000 line:80% align:center\nHi\n',
+    })]);
+
+    await subs.show(0);
+
+    expect(fetchTextMock).not.toHaveBeenCalled();
+    expect(track.cues[0]).toMatchObject({
+      startTime: 1,
+      endTime: 2,
+      text: 'Hi',
+      line: 80,
+      align: 'center',
+    });
+  });
+
+  it('caches parsed cues and reuses one TextTrack across selections', async () => {
+    fetchTextMock
+      .mockResolvedValueOnce('1\n00:00:01,000 --> 00:00:02,000\nAlpha\n')
+      .mockResolvedValueOnce('1\n00:00:03,000 --> 00:00:04,000\nBravo\n');
+    subs.attach(video, [
+      sidecar(),
+      sidecar({ id: '2', name: 'Track 2', url: 'http://host/b.srt' }),
+    ]);
+
+    await subs.show(0);
+    await subs.show(1);
+    await subs.show(0);
+
+    expect(fetchTextMock).toHaveBeenCalledTimes(2);
+    expect(addTextTrack).toHaveBeenCalledOnce();
+    expect(track.cues.map(cue => cue.text)).toEqual(['Alpha']);
+  });
+
+  it('ignores a repeated selection while the same sidecar is active', async () => {
+    let resolveFetch: (value: string) => void = () => {};
+    fetchTextMock.mockReturnValue(new Promise<string>((resolve) => {
+      resolveFetch = resolve;
+    }));
+    subs.attach(video, [sidecar()]);
+    const first = subs.show(0);
+    const repeated = subs.show(0);
+    resolveFetch('1\n00:00:01,000 --> 00:00:02,000\nHi\n');
+
+    await Promise.all([first, repeated]);
+
+    expect(fetchTextMock).toHaveBeenCalledOnce();
+    expect(track.cues).toHaveLength(1);
+  });
+
+  it('renders only the latest selection when an earlier load finishes last', async () => {
+    let resolveFirst: (value: string) => void = () => {};
+    fetchTextMock.mockImplementation((url: string) => {
+      if (url.endsWith('a.srt')) {
+        return new Promise<string>((resolve) => {
+          resolveFirst = resolve;
+        });
+      }
+      return Promise.resolve(
+        '1\n00:00:03,000 --> 00:00:04,000\nBravo\n',
+      );
+    });
+    subs.attach(video, [
+      sidecar(),
+      sidecar({ id: '2', name: 'Track 2', url: 'http://host/b.srt' }),
+    ]);
+    const first = subs.show(0);
+
+    await subs.show(1);
+    resolveFirst('1\n00:00:01,000 --> 00:00:02,000\nAlpha\n');
+    await first;
+
+    expect(subs.activeIndex).toBe(1);
+    expect(track.cues.map(cue => cue.text)).toEqual(['Bravo']);
+  });
+
+  it('re-renders cached cues after hide without fetching again', async () => {
+    fetchTextMock.mockResolvedValue(
+      '1\n00:00:01,000 --> 00:00:02,000\nHi\n',
+    );
+    subs.attach(video, [sidecar()]);
+
+    await subs.show(0);
+    subs.hide();
+    await subs.show(0);
+
+    expect(fetchTextMock).toHaveBeenCalledOnce();
+    expect(addTextTrack).toHaveBeenCalledOnce();
+    expect(track.mode).toBe('showing');
+    expect(track.cues).toHaveLength(1);
+  });
+
+  it('hides the active renderer when asked to show an invalid index', async () => {
+    subs.attach(video, [sidecar({
+      url: '',
+      text: 'WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHi\n',
+    })]);
+    await subs.show(0);
+
+    await subs.show(99);
+
+    expect(subs.activeIndex).toBe(-1);
+    expect(track.mode).toBe('disabled');
+    expect(track.cues).toEqual([]);
+  });
+
+  it('drops a load that finishes after a new item is attached', async () => {
+    let resolveFetch: (value: string) => void = () => {};
+    fetchTextMock.mockReturnValue(new Promise<string>((resolve) => {
+      resolveFetch = resolve;
+    }));
+    subs.attach(video, [sidecar()]);
+    const pending = subs.show(0);
+
+    subs.attach(video, [sidecar({ id: '2', name: 'Track 2' })]);
+    resolveFetch('1\n00:00:01,000 --> 00:00:02,000\nHi\n');
+    await pending;
+
+    expect(addTextTrack).not.toHaveBeenCalled();
+    expect(subs.activeIndex).toBe(-1);
+  });
+
+  it('allows a failed load to be retried', async () => {
+    fetchTextMock.mockRejectedValueOnce(new Error('net'));
+    subs.attach(video, [sidecar()]);
+
+    await subs.show(0);
+    expect(subs.activeIndex).toBe(-1);
+
+    fetchTextMock.mockResolvedValueOnce(
+      '1\n00:00:01,000 --> 00:00:02,000\nHi\n',
+    );
+    await subs.show(0);
+
+    expect(fetchTextMock).toHaveBeenCalledTimes(2);
+    expect(track.cues).toHaveLength(1);
+  });
+
+  it('appends an online subtitle and returns its picker index', async () => {
+    subs.attach(video, [sidecar()]);
+    const index = subs.addOnline(video, sidecar({
+      id: '2',
+      name: 'Track 2',
+      url: '',
+      text: 'WEBVTT\n\n00:00:03.000 --> 00:00:04.000\nHi\n',
+    }));
+
+    await subs.show(index);
+
+    expect(index).toBe(1);
+    expect(track.cues[0]).toMatchObject({ startTime: 3, endTime: 4 });
+  });
+
+  it('applies an absolute offset to rendered and future cues', async () => {
+    subs.attach(video, [sidecar({
+      url: '',
+      text: 'WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHi\n',
+    })]);
+    subs.setOffset(2);
+    await subs.show(0);
+    expect(track.cues[0]).toMatchObject({ startTime: 3, endTime: 4 });
+
+    subs.setOffset(0.5);
+    expect(track.cues[0]).toMatchObject({ startTime: 1.5, endTime: 2.5 });
+  });
+
+  it('hides and clears the reusable renderer', async () => {
+    subs.attach(video, [sidecar({
+      url: '',
+      text: 'WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHi\n',
+    })]);
+    await subs.show(0);
+
+    subs.hide();
+    expect(subs.activeIndex).toBe(-1);
+    expect(track.mode).toBe('disabled');
+    expect(track.cues).toEqual([]);
+
+    subs.clear();
+    await subs.show(0);
+    expect(addTextTrack).toHaveBeenCalledOnce();
   });
 });

@@ -3,8 +3,8 @@
 How this app handles subtitles for **VOD** — Xtream movies and series episodes, played as
 progressive `<video src>` (mp4/mkv) through the native pipeline. Two independent sources feed one
 picker: subtitles muxed **in the container**, and **sidecar** files listed by the panel. Sidecars
-render one of two ways by format: SRT/WebVTT as native `<track>`s, ASS/SSA through an `assjs`
-overlay.
+render one of two ways by format: SRT/WebVTT through a reusable application-created `TextTrack`,
+ASS/SSA through an `assjs` overlay.
 
 | | |
 |---|---|
@@ -14,15 +14,14 @@ overlay.
 
 ## TL;DR
 
-- In-container and SRT/WebVTT sidecars surface as native `video.textTracks`, so one path drives
-  them: `nativeSubtitleOptions` enumerates the `subtitles`/`captions` tracks for the picker, and
-  a pick sets `textTracks[i].mode` (`'showing'` / `'disabled'`; `-1` = all off).
+- In-container subtitles surface as native `video.textTracks`. SRT/WebVTT sidecars are synthetic
+  picker entries rendered through one reusable track created by `video.addTextTrack()`.
 - ASS/SSA sidecars can't be a native `<track>`; they join the **same picker** as synthetic
   options at `ASS_SUBTITLE_BASE + i` and are drawn by `assjs` into an `#ass-overlay`.
 - **Off by default** unless a saved pick applies. The choice is **remembered per item** under a
   `vod:<account>:<kind>:<itemId>` key — the same key the VOD audio memory uses.
-- Blink draws the native-track cues (like the HLS self-render path), so `::cue` styling applies
-  on-device; `assjs` draws ASS cues as HTML/CSS in the overlay.
+- Blink draws native and application-track cues, so `::cue` styling applies on-device; `assjs`
+  draws ASS cues as HTML/CSS in the overlay.
 - The player can also **search online** for a subtitle (SubDL, OpenSubtitles, and Assrt) — always
   offered for VOD once a provider is configured, not only when the bundled tracks come up empty;
   downloaded results reuse the in-memory-text paths for SRT/WebVTT/ASS and are cached to
@@ -45,18 +44,18 @@ resolve is useless (and unsafe to guess at). These ride the `VodPlayback` into t
 splits them by extension (`isAssSidecar`): SRT/WebVTT go to `VodSubtitles`, ASS/SSA to
 `AssSubtitles`.
 
-### SRT / WebVTT — native `<track>`s
+### SRT / WebVTT — reusable application `TextTrack`
 
-On play, `VodSubtitles.attach` creates one empty `<track>` per SRT/WebVTT sidecar on the
-`<video>`, so it lists in the picker via the same `nativeSubtitleOptions` path as in-container
-tracks. The cues are fetched, converted and parsed the **first time the track is shown**
-(`VodSubtitles.ensureLoaded`): a `WEBVTT` file is parsed directly, anything else is treated as
-SRT and converted first (`srtToVtt` / `parseSubtitleFile` in `src/utils/srt.ts` — SRT differs only
-in the `,mmm` fraction separator and the missing header; its numeric sequence lines are valid
-WebVTT cue identifiers).
+`VodSubtitles.attach` records the SRT/WebVTT sidecars as synthetic picker entries. The first
+selection fetches and parses the file, then feeds its cues to one track created with
+`video.addTextTrack()`. This matters on older webOS releases: they accept programmatic cues on an
+empty DOM `<track>` element but may not paint them, while an application-created track does.
 
-Because the `<track>`s are `<video>` children, the player's `innerHTML` reset between streams
-(`loadStream` / `stop`) removes them and their tracks — nothing leaks from one item into the next.
+The renderer track is reused because `addTextTrack()` tracks cannot be removed from a persistent
+video element. Switching sidecars clears and repopulates its cues; the internal renderer track is
+filtered out of the picker so each sidecar appears exactly once under its real name. Parsed cues
+stay cached for the current VOD item. A `WEBVTT` file is parsed directly; anything else is treated
+as SRT and converted first (`srtToVtt` / `parseSubtitleFile` in `src/utils/srt.ts`).
 
 ### ASS / SSA — `assjs` overlay
 
@@ -91,8 +90,9 @@ Memory is unchanged: an ASS pick is remembered by name/lang under the same
 The player can also search **external subtitle databases** and apply a result in-memory. It's
 offered for **any** VOD item once a provider is configured (not only when the bundled tracks are
 empty), so a user can swap in an online subtitle when a bundled one is out of sync or in the wrong
-language. Downloaded subtitles reuse the sidecar paths (SRT/WebVTT → native `<track>`, ASS/SSA →
-`AssSubtitles` overlay), and the pick + its text are cached so replay never re-fetches.
+language. Downloaded subtitles reuse the sidecar paths (SRT/WebVTT → reusable application
+`TextTrack`, ASS/SSA → `AssSubtitles` overlay), and the pick + its text are cached so replay never
+re-fetches.
 
 | | |
 |---|---|
@@ -180,7 +180,7 @@ The same per-stream offset (positive = later, step 0.25 s, range ±60 s; remembe
 `vod:<account>:<kind>:<itemId>`) applies to VOD:
 
 - **Sidecar SRT/WebVTT** cues are owned by `VodSubtitles`, so `setOffset(s)` bakes the
-  offset into loaded cues and shifts existing ones.
+  offset into the reusable renderer's loaded cues and shifts existing ones.
 - **ASS/SSA** uses `assjs`'s `ass.delay = s` (remembered so a later `show()` re-applies it).
 - **In-container native tracks** are foreign (the demux owns the cues); they are shifted
   best-effort by `shiftForeignTrack` (idempotent, base-time cache) — if the platform

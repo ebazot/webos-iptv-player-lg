@@ -472,7 +472,7 @@ const XTREAM_SCREENS: Screen[] = [
     name: 'vod-subtitle-offset',
     budget: 0.001,
     go: async (p) => {
-      await p.locator('[data-menu-action="__subs_track__"][data-track-index="0"]').click();
+      await p.locator('[data-menu-action="__subs_track__"][data-track-index="2000"]').click();
       await p.locator('[data-menu-action="__subs_open__"]').click();
       await p.locator('[data-menu-action="__subs_offset__"]').click();
       await expect(p.locator('#subtitle-offset:not(.hidden)')).toBeVisible();

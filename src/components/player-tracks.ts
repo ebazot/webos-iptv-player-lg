@@ -68,6 +68,7 @@ const SEARCH_ONLINE_INDEX = -3;
 // real textTracks index or the -1 Off / -2 CC sentinels; the i-th ASS sidecar is
 // ASS_SUBTITLE_BASE + i.
 export const ASS_SUBTITLE_BASE = 1000;
+export const VOD_SUBTITLE_BASE = 2000;
 
 interface PlayerTracksOptions {
   getVideoElement: () => HTMLVideoElement | null;
@@ -88,6 +89,7 @@ export class PlayerTracks {
   private dashSubs = new DashSubtitles(); // self-rendered DASH WebVTT on the native path
   private vodSubs = new VodSubtitles(); // sidecar SRT/WebVTT tracks for VOD (Xtream)
   private assSubs = new AssSubtitles(); // sidecar ASS/SSA subtitles for VOD, drawn by assjs
+  private vodTextSidecars: SidecarSubtitle[] = []; // SRT/WebVTT sidecars of the current VOD item
   private vodAssSidecars: SidecarSubtitle[] = []; // the ASS/SSA sidecars of the current VOD item
   private activeAssIndex = -1; // index into vodAssSidecars currently shown (-1 = none)
   private subsOverlay: SubtitleSearchOverlay | null = null; // online subtitle search overlay
@@ -110,6 +112,7 @@ export class PlayerTracks {
     this.masterUrl = '';
     this.subs.stop();
     this.dashSubs.stop();
+    this.clearVodSubtitles();
   }
 
   applyManifest(manifest: PipelineManifest): void {
@@ -127,11 +130,12 @@ export class PlayerTracks {
   attachVod(vod: VodPlayback): void {
     const video = this.options.getVideoElement();
     if (!video) return;
-    // Split sidecars: SRT/WebVTT render as native <track>s; ASS/SSA are drawn by
-    // assjs into an overlay. Both after loadStream — it resets the <video>'s children.
+    // Split sidecars: SRT/WebVTT use a reusable application TextTrack; ASS/SSA
+    // are drawn by assjs. Both attach after loadStream resets the video.
     this.activeAssIndex = -1;
+    this.vodTextSidecars = vod.subtitles.filter((s) => !isAssSidecar(s.url));
     this.vodAssSidecars = vod.subtitles.filter((s) => isAssSidecar(s.url));
-    this.vodSubs.attach(video, vod.subtitles.filter((s) => !isAssSidecar(s.url)));
+    this.vodSubs.attach(video, this.vodTextSidecars);
     this.assSubs.attach(video, video.parentElement ?? document.body, this.vodAssSidecars);
     void this.restoreOnlineSubtitle(vod);
   }
@@ -144,8 +148,13 @@ export class PlayerTracks {
   stop(): void {
     this.subs.stop();
     this.dashSubs.stop();
+    this.clearVodSubtitles();
+  }
+
+  private clearVodSubtitles(): void {
     this.vodSubs.clear();
     this.assSubs.destroy();
+    this.vodTextSidecars = [];
     this.vodAssSidecars = [];
     this.activeAssIndex = -1;
   }
@@ -196,6 +205,7 @@ export class PlayerTracks {
     if (this.pipeline.isMseActive()) return this.pipeline.mseSubtitleOptions().some(o => o.active);
     if (this.ccEnabled) return false;
     if (this.options.getVod()) {
+      if (this.vodSubs.activeIndex >= 0) return true;
       if (this.activeAssIndex >= 0) return true;
       const list = this.options.getVideoElement()?.textTracks;
       if (list) for (let i = 0; i < list.length; i++) {
@@ -343,12 +353,10 @@ export class PlayerTracks {
         this.applySubtitleChoice(ASS_SUBTITLE_BASE + this.vodAssSidecars.length - 1);
       } else {
         const video = this.options.getVideoElement();
-        const track = video ? this.vodSubs.addOnline(video, subtitle) : null;
-        if (video && track) {
-          const list = video.textTracks;
-          let trackIndex = -1;
-          for (let i = 0; i < list.length; i++) if (list[i] === track) trackIndex = i;
-          if (trackIndex >= 0) this.applySubtitleChoice(trackIndex);
+        if (video) {
+          this.vodTextSidecars.push(subtitle);
+          const sidecarIndex = this.vodSubs.addOnline(video, subtitle);
+          this.applySubtitleChoice(VOD_SUBTITLE_BASE + sidecarIndex);
         }
       }
       this.rememberSubtitle({
@@ -403,7 +411,10 @@ export class PlayerTracks {
       this.vodAssSidecars.push(subtitle);
     } else {
       const video = this.options.getVideoElement();
-      if (video) this.vodSubs.addOnline(video, subtitle);
+      if (video) {
+        this.vodTextSidecars.push(subtitle);
+        this.vodSubs.addOnline(video, subtitle);
+      }
     }
     this.applyNativeSubtitleSelection();
   }
@@ -534,12 +545,22 @@ export class PlayerTracks {
    */
   private subtitleOptions(): SubtitleOption[] {
     if (this.pipeline.isMseActive()) return this.pipeline.mseSubtitleOptions();
-    // VOD: in-container + SRT/WebVTT sidecars surface as switchable native
-    // textTracks; ASS/SSA sidecars can't, so they're appended as synthetic
-    // options at ASS_SUBTITLE_BASE + i (assjs draws them).
+    // VOD: keep in-container tracks native. Sidecars are synthetic picker
+    // options because their reusable addTextTrack renderer must stay hidden.
     if (this.options.getVod()) {
       const list = this.options.getVideoElement()?.textTracks;
-      const native = list ? nativeSubtitleOptions(list) : [];
+      const native = list
+        ? nativeSubtitleOptions(list)
+          .filter(option => !this.vodSubs.owns(list[option.index]))
+        : [];
+      const sidecars = this.vodTextSidecars.map((sidecar, index) => ({
+        index: VOD_SUBTITLE_BASE + index,
+        name: sidecar.name || sidecar.lang || t('player.subtitles'),
+        lang: sidecar.lang,
+        isDefault: false,
+        isForced: false,
+        active: this.vodSubs.activeIndex === index,
+      }));
       const ass = this.vodAssSidecars.map((sidecar, index) => ({
         index: ASS_SUBTITLE_BASE + index,
         name: sidecar.name,
@@ -548,7 +569,7 @@ export class PlayerTracks {
         isForced: false,
         active: this.activeAssIndex === index,
       }));
-      return native.concat(ass);
+      return native.concat(sidecars, ass);
     }
     // webOS native live/catch-up: in-manifest WebVTT is self-rendered (not surfaced
     // as switchable textTracks), so the choices are the parsed master renditions and
@@ -686,12 +707,24 @@ export class PlayerTracks {
       this.pipeline.setMseSubtitleTrack(index);
       return;
     }
-    // VOD: an ASS/SSA sidecar (index >= ASS_SUBTITLE_BASE) is drawn by assjs;
-    // otherwise toggle the native textTrack modes directly (index -1 = all off).
-    // One path draws at a time, so each disables the other.
+    // VOD has three mutually exclusive paths: reusable SRT/WebVTT TextTrack,
+    // ASS overlay, or native in-container track.
     if (this.options.getVod()) {
       const list = this.options.getVideoElement()?.textTracks;
+      if (index >= VOD_SUBTITLE_BASE) {
+        if (list) for (let i = 0; i < list.length; i++) {
+          const track = list[i];
+          if (track.kind === 'subtitles' || track.kind === 'captions') {
+            track.mode = 'disabled';
+          }
+        }
+        this.activeAssIndex = -1;
+        this.assSubs.hide();
+        void this.vodSubs.show(index - VOD_SUBTITLE_BASE);
+        return;
+      }
       if (index >= ASS_SUBTITLE_BASE) {
+        this.vodSubs.hide();
         if (list) for (let i = 0; i < list.length; i++) {
           const track = list[i];
           if (track.kind === 'subtitles' || track.kind === 'captions') {
@@ -703,6 +736,7 @@ export class PlayerTracks {
         if (sidecar) void this.assSubs.show(index - ASS_SUBTITLE_BASE);
         return;
       }
+      this.vodSubs.hide();
       this.activeAssIndex = -1;
       this.assSubs.hide();
       if (!list) return;
@@ -710,9 +744,6 @@ export class PlayerTracks {
         const track = list[i];
         if (track.kind !== 'subtitles' && track.kind !== 'captions') continue;
         track.mode = i === index ? 'showing' : 'disabled';
-      }
-      if (index >= 0 && list[index]) {
-        void this.vodSubs.ensureLoaded(list[index]); // lazy-load a sidecar's cues
       }
       return;
     }
@@ -825,6 +856,10 @@ export class PlayerTracks {
       this.legacyPreferenceKey(),
     );
     if (this.options.getVod()) {
+      // addTextTrack fires addtrack while the reusable sidecar renderer is being
+      // created. Its selection is already authoritative; reapplying here can
+      // mistake that internal track for an in-container option on older engines.
+      if (this.vodSubs.activeIndex >= 0) return;
       const options = this.subtitleOptions();
       if (!options.length) return;
       const index = chooseSubtitleIndex(options, pref);

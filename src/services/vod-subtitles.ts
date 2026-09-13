@@ -3,54 +3,70 @@ import { parseSubtitleFile } from '../utils/srt';
 import { fetchText } from '../utils/fetch-helper';
 import { createLogger } from '../utils/logger';
 import { t } from '../i18n';
+import { WebVttCueTrack } from './webvtt-cue-track';
+import type { VttCue } from '../utils/webvtt';
 
 const log = createLogger('VodSubs');
 
 /**
- * Loads Xtream sidecar subtitle files (SRT / WebVTT) as native `<track>` text
- * tracks on the VOD player. Each sidecar becomes an empty `<track>` up front so
- * it lists in the subtitle picker immediately; its cues are fetched and parsed
- * the first time it's actually shown. The `<track>` elements are children of the
- * `<video>`, so the player's `innerHTML` reset between streams removes them and
- * their tracks — no leakage from one item into the next.
+ * Loads Xtream sidecar subtitle files (SRT / WebVTT) into one reusable
+ * application-created TextTrack. Empty `<track>` elements accept cues but do not
+ * paint them on some older webOS releases, while `addTextTrack()` does.
  */
 export class VodSubtitles {
-  private entries: { track: TextTrack; url: string; text?: string; loaded: boolean }[] = [];
-  private gen = 0; // bumped on each attach/clear; in-flight loads bail when it changes
-  private offset = 0; // per-stream subtitle timing offset (seconds; + = later)
+  private entries: Array<{
+    name: string;
+    lang: string;
+    url: string;
+    text?: string;
+    cues?: VttCue[];
+    loading?: Promise<VttCue[]>;
+  }> = [];
+  private video: HTMLVideoElement | null = null;
+  private cueTrack = new WebVttCueTrack();
+  private gen = 0;
+  private _activeIndex = -1;
+
+  get activeIndex(): number {
+    return this._activeIndex;
+  }
 
   attach(video: HTMLVideoElement, sidecars: SidecarSubtitle[]): void {
-    this.gen++;
-    this.entries = [];
-    for (const s of sidecars) {
-      const el = document.createElement('track');
-      el.kind = 'subtitles';
-      el.label = s.name || s.lang || t('player.subtitles');
-      if (s.lang) el.srclang = s.lang;
-      video.appendChild(el);
-      const track = el.track;
-      if (!track) continue;
-      track.mode = 'disabled';
-      this.entries.push({ track, url: s.url, text: s.text, loaded: false });
-    }
+    this.clear();
+    this.video = video;
+    this.entries = sidecars.map(sidecar => ({
+      name: sidecar.name || sidecar.lang || t('player.subtitles'),
+      lang: sidecar.lang,
+      url: sidecar.url,
+      text: sidecar.text,
+    }));
     if (sidecars.length) log.info('attached', this.entries.length, 'sidecar track(s)');
   }
 
-  // Fetch + parse + populate the cues for `track` the first time it's shown.
-  // No-op for a track we don't own or one already loaded.
-  async ensureLoaded(track: TextTrack): Promise<void> {
-    const entry = this.entries.find((e) => e.track === track);
-    if (!entry || entry.loaded) return;
-    entry.loaded = true; // claim before await so a repeated show doesn't double-fetch
-    const gen = this.gen;
+  async show(index: number): Promise<void> {
+    const entry = this.entries[index];
+    const video = this.video;
+    if (!entry || !video) {
+      this.hide();
+      return;
+    }
+    if (this._activeIndex === index) return;
+    const gen = ++this.gen;
+    this._activeIndex = index;
+    this.cueTrack.disable();
     try {
-      const raw = entry.text != null ? entry.text : await fetchText(entry.url);
-      const cues = parseSubtitleFile(raw);
-      if (gen !== this.gen) return; // a new item was attached while this was fetching
-      for (const c of cues) entry.track.addCue(new VTTCue(c.start + this.offset, c.end + this.offset, c.text));
+      const cues = await this.load(entry);
+      if (gen !== this.gen) return;
+      this.cueTrack.attach(video, entry.name, entry.lang);
+      for (const cue of cues) {
+        this.cueTrack.add(cue.start, cue.end, cue.text, cue.settings);
+      }
       log.info('loaded', cues.length, 'cues from', entry.url);
     } catch (e) {
-      entry.loaded = false; // allow a retry on the next show
+      if (gen === this.gen) {
+        this._activeIndex = -1;
+        this.cueTrack.disable();
+      }
       log.warn(
         'VOD sidecar subtitle load failed',
         'event=xtream.subtitle.load.failed',
@@ -59,44 +75,57 @@ export class VodSubtitles {
     }
   }
 
-  /** Append one more sidecar track after attach (online results fetched
-   *  mid-playback). Does not disturb existing entries or bump `gen`. */
-  addOnline(video: HTMLVideoElement, sub: SidecarSubtitle): TextTrack | null {
-    const el = document.createElement('track');
-    el.kind = 'subtitles';
-    el.label = sub.name || sub.lang || t('player.subtitles');
-    if (sub.lang) el.srclang = sub.lang;
-    video.appendChild(el);
-    const track = el.track;
-    if (!track) return null;
-    track.mode = 'disabled';
-    this.entries.push({ track, url: sub.url, text: sub.text, loaded: false });
-    return track;
-  }
-
-  /** Shift all sidecar cues (across every owned track) by `seconds`. Positive = later. */
-  setOffset(seconds: number): void {
-    const delta = seconds - this.offset;
-    this.offset = seconds;
-    if (!delta) return;
-    for (const e of this.entries) {
-      const cues = e.track.cues;
-      if (!cues) continue;
-      for (let i = 0; i < cues.length; i++) {
-        const c = cues[i] as VTTCue;
-        c.startTime += delta;
-        c.endTime += delta;
-      }
+  private load(entry: typeof this.entries[number]): Promise<VttCue[]> {
+    if (entry.cues) return Promise.resolve(entry.cues);
+    if (!entry.loading) {
+      entry.loading = (entry.text != null
+        ? Promise.resolve(entry.text)
+        : fetchText(entry.url))
+        .then(parseSubtitleFile)
+        .then((cues) => {
+          entry.cues = cues;
+          entry.loading = undefined;
+          return cues;
+        }, (error: unknown) => {
+          entry.loading = undefined;
+          throw error;
+        });
     }
+    return entry.loading;
   }
 
-  /** True when `track` is one of the sidecar tracks this instance created. */
+  /** Append a sidecar downloaded during playback and return its picker index. */
+  addOnline(video: HTMLVideoElement, sub: SidecarSubtitle): number {
+    if (this.video !== video) {
+      this.clear();
+      this.video = video;
+    }
+    this.entries.push({
+      name: sub.name || sub.lang || t('player.subtitles'),
+      lang: sub.lang,
+      url: sub.url,
+      text: sub.text,
+    });
+    return this.entries.length - 1;
+  }
+
+  hide(): void {
+    this.gen++;
+    this._activeIndex = -1;
+    this.cueTrack.disable();
+  }
+
+  setOffset(seconds: number): void {
+    this.cueTrack.setOffset(seconds);
+  }
+
   owns(track: TextTrack): boolean {
-    return this.entries.some((e) => e.track === track);
+    return this.cueTrack.owns(track);
   }
 
   clear(): void {
-    this.gen++;
+    this.hide();
     this.entries = [];
+    this.video = null;
   }
 }
