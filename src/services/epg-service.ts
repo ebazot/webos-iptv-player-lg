@@ -62,6 +62,9 @@ class EpgServiceImpl {
   private derivedOffsets = new Map<string, { id: string; baseId: string; minutes: number }>();
   private mappedChannelIds: string[] = [];
   private playlistChannels: Channel[] | null = null;
+  /** The per-source filter the last completed load was built from. */
+  private appliedFilters = new Map<string, SourceFilter | null>();
+  private pendingWork: Promise<void> | null = null;
   private revision = 0;
   private mappingRevisionValue = 0;
 
@@ -88,24 +91,73 @@ class EpgServiceImpl {
     this.derivedOffsets.clear();
     this.mappedChannelIds = [];
     this.playlistChannels = null;
+    this.appliedFilters.clear();
   }
 
-  async load(
+  load(
     sources: EpgSource[],
     channels?: Channel[],
     onDataPublished?: () => void,
   ): Promise<void> {
-    const revision = ++this.revision;
+    return this.enqueue(() => this.runLoad(sources, channels, onDataPublished));
+  }
+
+  /**
+   * One XMLTV parse at a time. Two concurrent parses hold two full sets of
+   * retained programmes, which is the allocation the retention ceiling exists
+   * to bound, and `refresh()` reaches the same parser as `load()` — so both
+   * queue here. Each body re-reads its own preconditions when it finally
+   * runs, so work the entry ahead of it already did is skipped, not repeated.
+   */
+  private enqueue(run: () => Promise<void>): Promise<void> {
+    const previous = this.pendingWork;
+    const task = (async () => {
+      if (previous) await previous.catch(() => undefined);
+      await run();
+    })();
+    this.pendingWork = task;
+    return (async () => {
+      try {
+        await task;
+      } finally {
+        if (this.pendingWork === task) this.pendingWork = null;
+      }
+    })();
+  }
+
+  private async runLoad(
+    sources: EpgSource[],
+    channels?: Channel[],
+    onDataPublished?: () => void,
+  ): Promise<void> {
+    const previousSources = this.sources;
     this.playlistChannels = channels ?? null;
-    this.mappedChannelIds = ChannelCustomizationService.epgChannelIds();
+    this.mappedChannelIds = this.collectMappedChannelIds();
     this.setSources(sources);
+    const filters = new Map(this.sources.map((source) =>
+      [source.url, this.filterFor(source)] as const));
+    // Entering and leaving channel edit mode rebuilds the channel array to
+    // reveal hidden entries, without changing which channels are eligible
+    // or what they map to. Reloading on that would re-read the whole cached
+    // guide, or start a second parse, for an identical filter.
+    if (this.loaded
+      && sameSourceList(previousSources, this.sources)
+      && sameFilters(this.appliedFilters, filters)) {
+      return;
+    }
+    this.appliedFilters = filters;
+    const revision = ++this.revision;
     await Promise.all(this.sources.map((source) =>
       this.loadSource(source, revision, onDataPublished)));
     if (revision !== this.revision) return;
     this.publish(revision);
   }
 
-  async refresh(onDataPublished?: () => void): Promise<void> {
+  refresh(onDataPublished?: () => void): Promise<void> {
+    return this.enqueue(() => this.runRefresh(onDataPublished));
+  }
+
+  private async runRefresh(onDataPublished?: () => void): Promise<void> {
     const sourcesToRefresh = this.sources.filter((source) => {
       const state = this.states.get(source.url);
       return !state || state.needsRefresh
@@ -114,7 +166,7 @@ class EpgServiceImpl {
     if (!sourcesToRefresh.length) return;
 
     const revision = ++this.revision;
-    this.mappedChannelIds = ChannelCustomizationService.epgChannelIds();
+    this.mappedChannelIds = this.collectMappedChannelIds();
     await Promise.all(sourcesToRefresh.map(source =>
       this.fetchSource(source, this.filterFor(source), revision, onDataPublished)));
     if (revision !== this.revision) return;
@@ -434,8 +486,9 @@ class EpgServiceImpl {
             channelIds: filter.ids,
             channelNames: filter.names,
             retainChannelCatalog: true,
+            maxProgrammes: CONFIG.EPG.MAX_RETAINED_PROGRAMMES,
           }
-        : {});
+        : { maxProgrammes: CONFIG.EPG.MAX_RETAINED_PROGRAMMES });
       if (revision !== this.revision) {
         done();
         return;
@@ -448,15 +501,28 @@ class EpgServiceImpl {
         done();
         return;
       }
+      // A truncated parse is usable for this session, but it is not the
+      // guide the filter asked for — so it must not settle as the answer.
+      const truncated = stats.droppedBudget > 0;
       this.setState(source.url, {
         data: result,
         timestamp: Date.now(),
-        needsRefresh: false,
+        needsRefresh: truncated,
       });
       if (onDataPublished) this.publish(revision, onDataPublished);
       log.info('Loaded', source.url, '|', Object.keys(result.channels).length, 'channels,',
         programmeCount, 'programmes', filter ? `(of ${String(stats.programmesSeen)} seen)` : '');
-      if (programmeCount > 0) {
+      if (truncated) {
+        // Caching it under the full filter would make `covers()` report the
+        // gap as covered on the next boot, turning it permanent and silent.
+        log.warn(
+          'EPG hit its retention ceiling; partial guide, not cached',
+          'event=epg.budget.exhausted',
+          `kept=${String(programmeCount)}`,
+          `dropped=${String(stats.droppedBudget)}`,
+          'hint=hide the channels you do not watch',
+        );
+      } else if (programmeCount > 0) {
         await setCachedEpg(source.url, result, serializeFilter(filter));
       } else {
         log.warn('EPG has 0 programmes — not caching:', source.url);
@@ -493,6 +559,22 @@ class EpgServiceImpl {
       }
     }
     this.channelIdsByName.set(url, index);
+  }
+
+  /**
+   * The EPG ids the saved mappings point at, derived from the eligible
+   * channels — a hidden channel must not pull its programmes back into the
+   * filter through a mapping. Without a channel list nothing is filtered
+   * anyway, so every saved mapping stands.
+   */
+  private collectMappedChannelIds(): string[] {
+    const mapped = ChannelCustomizationService.epgChannelIds();
+    // Nothing mapped is the common case, and it costs one sparse walk; only
+    // a playlist that actually carries mappings pays for the key set.
+    if (this.playlistChannels === null || !mapped.length) return mapped;
+    const eligible = new Set<string>();
+    for (const channel of this.playlistChannels) eligible.add(channelKey(channel));
+    return ChannelCustomizationService.epgChannelIdsFor(eligible);
   }
 
   /**
@@ -626,6 +708,39 @@ function covers(cached: CachedEpgFilter | null | undefined, wanted: SourceFilter
   const names = new Set(cached.names);
   for (const id of wanted.ids) if (!ids.has(id)) return false;
   for (const name of wanted.names) if (!names.has(name)) return false;
+  return true;
+}
+
+function sameSourceList(current: EpgSource[], next: EpgSource[]): boolean {
+  if (current.length !== next.length) return false;
+  for (let i = 0; i < current.length; i++) {
+    if (current[i].url !== next[i].url) return false;
+    if (current[i].kind !== next[i].kind) return false;
+    if ((current[i].offsetMinutes ?? 0) !== (next[i].offsetMinutes ?? 0)) return false;
+  }
+  return true;
+}
+
+function sameFilters(
+  current: ReadonlyMap<string, SourceFilter | null>,
+  next: ReadonlyMap<string, SourceFilter | null>,
+): boolean {
+  if (current.size !== next.size) return false;
+  for (const [url, filter] of next) {
+    if (!current.has(url)) return false;
+    if (!sameFilter(current.get(url) ?? null, filter)) return false;
+  }
+  return true;
+}
+
+function sameFilter(current: SourceFilter | null, next: SourceFilter | null): boolean {
+  if (!current || !next) return current === next;
+  return sameSet(current.ids, next.ids) && sameSet(current.names, next.names);
+}
+
+function sameSet(current: ReadonlySet<string>, next: ReadonlySet<string>): boolean {
+  if (current.size !== next.size) return false;
+  for (const value of next) if (!current.has(value)) return false;
   return true;
 }
 

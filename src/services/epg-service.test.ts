@@ -3,6 +3,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 const {
   channelOverrideMock,
   epgChannelIdsMock,
+  epgChannelIdsForMock,
   fetchAndParseXMLTVMock,
   parseXMLTVMock,
 } = vi.hoisted(() => ({
@@ -11,6 +12,7 @@ const {
     epgOffsetDeltaMinutes?: number;
   } | null),
   epgChannelIdsMock: vi.fn(() => [] as string[]),
+  epgChannelIdsForMock: vi.fn(() => [] as string[]),
   fetchAndParseXMLTVMock: vi.fn(),
   parseXMLTVMock: vi.fn(),
 }));
@@ -24,6 +26,7 @@ vi.mock('./channel-customization', () => ({
   ChannelCustomizationService: {
     overrideFor: channelOverrideMock,
     epgChannelIds: epgChannelIdsMock,
+    epgChannelIdsFor: epgChannelIdsForMock,
   },
 }));
 vi.mock('../parsers/xmltv-parser', () => {
@@ -87,6 +90,8 @@ beforeEach(() => {
   ) => parseXMLTVWithStats(await fetchMaybeGzipText(url, 120000), options));
   channelOverrideMock.mockReturnValue(null);
   epgChannelIdsMock.mockReturnValue([]);
+  // Default: every saved mapping belongs to an eligible channel.
+  epgChannelIdsForMock.mockImplementation(() => epgChannelIdsMock());
   EpgService.reset();
   vi.mocked(getCachedEpg).mockResolvedValue(null);
 });
@@ -292,6 +297,99 @@ describe('EpgService multi-source matching', () => {
 
     expect(epgChannelIdsMock).toHaveBeenCalledTimes(1);
     expect(channelOverrideMock).not.toHaveBeenCalled();
+  });
+
+  it('scopes saved mappings to the eligible channels', async () => {
+    const mappedId = `${encodeURIComponent('http://a')}::epg.7`;
+    const visible = channel({ id: 'a', name: 'Alpha', url: 'http://host/a', playlistIds: ['a'] });
+    const hidden = channel({ id: 'b', name: 'Bravo', url: 'http://host/b', playlistIds: ['a'] });
+    epgChannelIdsMock.mockReturnValue([mappedId]);
+    // Stand in for the real lookup: the mapping belongs to the hidden channel.
+    epgChannelIdsForMock.mockImplementation((keys: ReadonlySet<string>) =>
+      keys.has(channelKey(hidden)) ? [mappedId] : []);
+    parseXMLTVMock.mockReturnValue(parsed('a', 'Alpha', 'Program'));
+
+    // getEpgEligibleChannels() drops the hidden channel before we see it.
+    await EpgService.load([source('http://a', ['a'])], [visible]);
+
+    const scoped = epgChannelIdsForMock.mock.calls[0][0];
+    expect(scoped.has(channelKey(visible))).toBe(true);
+    expect(scoped.has(channelKey(hidden))).toBe(false);
+    const options = vi.mocked(parseXMLTVWithStats).mock.calls[0][1] as {
+      channelIds: Set<string>;
+    };
+    expect([...options.channelIds]).toEqual(['a']);
+  });
+
+  it('skips a reload when the eligible channels and mappings are unchanged', async () => {
+    parseXMLTVMock.mockReturnValue(parsed('a', 'Alpha', 'Program'));
+    const channels = [channel({
+      id: 'a', name: 'Alpha', url: 'http://host/a', playlistIds: ['a'],
+    })];
+    await EpgService.load([source('http://a', ['a'])], channels);
+    expect(vi.mocked(parseXMLTVWithStats)).toHaveBeenCalledTimes(1);
+
+    // Entering edit mode rebuilds the array without changing the selection.
+    await EpgService.load([source('http://a', ['a'])], channels.slice());
+
+    expect(vi.mocked(parseXMLTVWithStats)).toHaveBeenCalledTimes(1);
+    expect(getCachedEpg).toHaveBeenCalledTimes(1);
+  });
+
+  it('never runs two XMLTV loads at once', async () => {
+    let resolveFetch: (value: string) => void = () => undefined;
+    vi.mocked(fetchMaybeGzipText).mockImplementationOnce(() =>
+      new Promise(resolve => { resolveFetch = resolve; }));
+    parseXMLTVMock.mockReturnValue(parsed('a', 'Alpha', 'Program'));
+    const alpha = channel({ id: 'a', name: 'Alpha', url: 'http://host/a', playlistIds: ['a'] });
+    const bravo = channel({ id: 'b', name: 'Bravo', url: 'http://host/b', playlistIds: ['a'] });
+
+    const first = EpgService.load([source('http://a', ['a'])], [alpha]);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(fetchMaybeGzipText).toHaveBeenCalledTimes(1);
+
+    // A visibility edit landing mid-load would otherwise start a second
+    // download and parse, holding two full sets of programmes at once.
+    const second = EpgService.load([source('http://a', ['a'])], [alpha, bravo]);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(fetchMaybeGzipText).toHaveBeenCalledTimes(1);
+
+    resolveFetch('xml');
+    await first;
+    await second;
+    expect(fetchMaybeGzipText).toHaveBeenCalledTimes(2);
+  });
+
+  it('queues a guide refresh behind an in-flight load', async () => {
+    let resolveFetch: (value: string) => void = () => undefined;
+    vi.mocked(fetchMaybeGzipText).mockImplementationOnce(() =>
+      new Promise(resolve => { resolveFetch = resolve; }));
+    parseXMLTVMock.mockReturnValue(parsed('a', 'Alpha', 'Program'));
+    const alpha = channel({
+      id: 'a', name: 'Alpha', url: 'http://host/a', playlistIds: ['a'],
+    });
+
+    const loading = EpgService.load([source('http://a', ['a'])], [alpha]);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(fetchMaybeGzipText).toHaveBeenCalledTimes(1);
+
+    // Opening the Guide mid-load calls refresh(), which would otherwise see
+    // no source state yet and start a second download and parse.
+    const refreshing = EpgService.refresh();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(fetchMaybeGzipText).toHaveBeenCalledTimes(1);
+
+    resolveFetch('xml');
+    await loading;
+    await refreshing;
+
+    // By the time it runs the source is loaded and fresh, so it refetches
+    // nothing rather than repeating the work queued ahead of it.
+    expect(fetchMaybeGzipText).toHaveBeenCalledTimes(1);
   });
 
   it('lists searchable mapping candidates only from eligible feeds', async () => {
@@ -553,7 +651,9 @@ describe('EpgService channel pre-filter', () => {
     vi.mocked(parseXMLTVWithStats).mockClear();
     EpgService.reset();
     await EpgService.load([source('http://a', ['a'])]);
-    expect(vi.mocked(parseXMLTVWithStats).mock.calls[0][1]).toEqual({});
+    expect(vi.mocked(parseXMLTVWithStats).mock.calls[0][1]).toEqual({
+      maxProgrammes: CONFIG.EPG.MAX_RETAINED_PROGRAMMES,
+    });
   });
 
   it('keeps an unmatched filter instead of retaining the entire feed', async () => {
@@ -572,6 +672,49 @@ describe('EpgService channel pre-filter', () => {
 
     expect(vi.mocked(parseXMLTVWithStats)).toHaveBeenCalledTimes(1);
     expect(setCachedEpg).not.toHaveBeenCalled();
+  });
+
+  it('does not cache a guide the retention ceiling truncated', async () => {
+    vi.mocked(parseXMLTVWithStats).mockReturnValueOnce({
+      data: parsed('a', 'Alpha', 'Program'),
+      stats: {
+        channelsKept: 1,
+        programmesSeen: 500,
+        programmesMatched: 500,
+        programmesKept: 1,
+        droppedBudget: 499,
+      },
+    } as never);
+
+    await EpgService.load([source('http://a', ['a'])], [
+      channel({ id: 'a', name: 'Alpha', playlistIds: ['a'] }),
+    ]);
+
+    // Cached under the full filter it would read as covered on the next
+    // boot, and the gap would never be retried.
+    expect(setCachedEpg).not.toHaveBeenCalled();
+    expect(EpgService.getNowPlaying(EpgService.findChannelId(
+      channel({ id: 'a', name: 'Alpha', playlistIds: ['a'] }),
+    )!)?.title).toBe('Program');
+  });
+
+  it('caches a guide that stayed under the retention ceiling', async () => {
+    vi.mocked(parseXMLTVWithStats).mockReturnValueOnce({
+      data: parsed('a', 'Alpha', 'Program'),
+      stats: {
+        channelsKept: 1,
+        programmesSeen: 1,
+        programmesMatched: 1,
+        programmesKept: 1,
+        droppedBudget: 0,
+      },
+    } as never);
+
+    await EpgService.load([source('http://a', ['a'])], [
+      channel({ id: 'a', name: 'Alpha', playlistIds: ['a'] }),
+    ]);
+
+    expect(setCachedEpg).toHaveBeenCalledTimes(1);
   });
 
   it('keeps a valid filter when its programmes are outside the time window', async () => {
