@@ -30,6 +30,7 @@ const ENTRY_META_INDEX_KEY = 'entry-index';
 const ENTRY_META_VERSION = 1;
 const ACCESS_TOUCH_INTERVAL_MS = 60 * 60 * 1000;
 const STORAGE_ESTIMATE_TTL_MS = 60 * 1000;
+const JSON_NULL_BYTES = 4;
 
 export type CacheCategory = typeof CACHE_CATEGORIES[number];
 
@@ -215,10 +216,83 @@ function ttlFor(category: CacheCategory): number {
 
 const openDb = openPersistenceDb;
 
+function jsonStringBytes(value: string): number {
+  let bytes = 2;
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code === 34 || code === 92 || code === 8 || code === 9
+        || code === 10 || code === 12 || code === 13) {
+      bytes += 2;
+    } else if (code < 32) {
+      bytes += 6;
+    } else if (code < 128) {
+      bytes++;
+    } else if (code < 2048) {
+      bytes += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff
+        && i + 1 < value.length
+        && value.charCodeAt(i + 1) >= 0xdc00
+        && value.charCodeAt(i + 1) <= 0xdfff) {
+      bytes += 4;
+      i++;
+    } else {
+      bytes += 3;
+    }
+  }
+  return bytes;
+}
+
 function serializedBytes(value: unknown): number {
-  const json = JSON.stringify(value);
-  if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(json).byteLength;
-  return json.length * 2;
+  const ancestors = new WeakSet<object>();
+
+  const measure = (item: unknown, arrayItem: boolean): number => {
+    switch (typeof item) {
+      case 'string':
+        return jsonStringBytes(item);
+      case 'number':
+        return Number.isFinite(item) ? String(item).length : JSON_NULL_BYTES;
+      case 'boolean':
+        return item ? 4 : 5;
+      case 'bigint':
+        throw new TypeError('BigInt cannot be serialized to JSON');
+      case 'undefined':
+      case 'function':
+      case 'symbol':
+        return arrayItem ? JSON_NULL_BYTES : 0;
+      case 'object':
+        break;
+    }
+    if (item === null) return JSON_NULL_BYTES;
+    if (item instanceof Date) {
+      return Number.isFinite(item.getTime())
+        ? jsonStringBytes(item.toISOString())
+        : JSON_NULL_BYTES;
+    }
+    if (ancestors.has(item)) throw new TypeError('Circular cache value');
+    ancestors.add(item);
+    let bytes = 2;
+    let entries = 0;
+    if (Array.isArray(item)) {
+      for (let i = 0; i < item.length; i++) {
+        bytes += measure(item[i], true);
+        entries++;
+      }
+    } else {
+      const record = item as Record<string, unknown>;
+      for (const key in record) {
+        if (!Object.prototype.hasOwnProperty.call(record, key)) continue;
+        const field = record[key];
+        const valueBytes = measure(field, false);
+        if (!valueBytes) continue;
+        bytes += jsonStringBytes(key) + 1 + valueBytes;
+        entries++;
+      }
+    }
+    ancestors.delete(item);
+    return bytes + Math.max(0, entries - 1);
+  };
+
+  return measure(value, false);
 }
 
 function finiteNumber(value: unknown, fallback: number): number {
@@ -497,6 +571,19 @@ async function readMetadata(): Promise<{
   return { categories, total };
 }
 
+async function readEntryMeta(
+  store: CacheStore,
+  key: IDBValidKey,
+): Promise<CacheEntryMeta | null> {
+  const db = await openDb();
+  if (!db) return null;
+  const tx = db.transaction(META_STORE, 'readonly');
+  const raw = await requestResult(
+    tx.objectStore(META_STORE).get(entryMetaId(store, key)),
+  );
+  return isCacheEntryMeta(raw) ? raw : null;
+}
+
 async function storageEstimate(): Promise<{ usage: number | null; quota: number | null }> {
   try {
     // StorageManager is absent on webOS 4; guard before accessing it.
@@ -692,7 +779,7 @@ function isQuotaError(err: unknown): boolean {
 async function commitRecord(
   store: CacheStore,
   record: StoredRecord,
-  previous: StoredRecord | null,
+  previous: CacheEntryMeta | null,
 ): Promise<void> {
   const db = await openDb();
   if (!db) throw new Error('IndexedDB unavailable');
@@ -750,11 +837,11 @@ async function putRawNow(
     return false;
   }
   await ensureMetadata();
-  const previous = await readRawWithoutTouch(store, key);
+  const previous = await readEntryMeta(store, key);
   const record = normalizeRecord(store, raw);
   await ensureCapacity(Math.max(0, record.byteSize - (previous?.byteSize ?? 0)));
   try {
-    const latest = await readRawWithoutTouch(store, key);
+    const latest = await readEntryMeta(store, key);
     await commitRecord(store, record, latest);
     return true;
   } catch (err) {
@@ -768,7 +855,7 @@ async function putRawNow(
       );
       await pruneBytes(record.byteSize + CLEANUP_MARGIN_BYTES);
       try {
-        const latest = await readRawWithoutTouch(store, key);
+        const latest = await readEntryMeta(store, key);
         await commitRecord(store, record, latest);
         return true;
       } catch (retryErr) {

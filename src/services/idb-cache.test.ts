@@ -279,6 +279,56 @@ describe('idb-cache', () => {
     expect((await getCacheUsage()).total).toEqual({ bytes: 0, entries: 0 });
   });
 
+  it('accounts for serialized bytes without changing JSON sizing semantics', async () => {
+    await setCachedCatalog('x1|sizing', {
+      text: '\u0000"\\é😀',
+      values: [true, false, null, undefined, 12.5, Number.NaN],
+    });
+    const db = await openPersistenceDb();
+    expect(db).not.toBeNull();
+    const tx = db!.transaction([CATALOG_STORE, CACHE_META_STORE], 'readonly');
+    const record = await requestResult(tx.objectStore(CATALOG_STORE).get('x1|sizing')) as
+      Record<string, unknown>;
+    const meta = await requestResult(
+      tx.objectStore(CACHE_META_STORE).get('entry:catalog-cache:x1|sizing'),
+    ) as { byteSize: number };
+    const expected = new TextEncoder().encode(JSON.stringify({
+      ...record,
+      byteSize: 0,
+    })).byteLength;
+
+    expect(meta.byteSize).toBe(expected);
+  });
+
+  it('updates cache accounting without reading the previous payload', async () => {
+    await setCachedCatalog('x1|vod_all', Array.from({ length: 100 }, (_, index) => index));
+    const transaction = IDBDatabase.prototype.transaction;
+    const payloadReads: Array<{ stores: string | string[]; mode?: IDBTransactionMode }> = [];
+    const transactionSpy = vi.spyOn(IDBDatabase.prototype, 'transaction').mockImplementation(
+      function (
+        this: IDBDatabase,
+        storeNames: string | string[],
+        mode?: IDBTransactionMode,
+      ) {
+        if (mode === 'readonly'
+            && (storeNames === CATALOG_STORE
+              || (Array.isArray(storeNames) && storeNames.includes(CATALOG_STORE)))) {
+          payloadReads.push({ stores: storeNames, mode });
+        }
+        return transaction.call(this, storeNames, mode);
+      },
+    );
+
+    try {
+      await setCachedCatalog('x1|vod_all', Array.from({ length: 200 }, (_, index) => index));
+    } finally {
+      transactionSpy.mockRestore();
+    }
+
+    expect(payloadReads).toEqual([]);
+    expect((await getCacheUsage()).categories.catalog.entries).toBe(1);
+  });
+
   it('touches access metadata without rewriting a cached payload', async () => {
     await setCachedCatalog('x1|vod_all', Array.from({ length: 100 }, (_, index) => index));
     const db = await openPersistenceDb();
