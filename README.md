@@ -198,6 +198,8 @@ If no device name is given, the default device from `ares-setup-device` is used.
 
 ### Debug on a TV
 
+On Windows, use WSL 2; native Windows is not supported.
+
 `scripts/tv.sh` reads the connection details for the default
 `ares-setup-device` device, so keys and passphrases do not need to be copied
 into commands.

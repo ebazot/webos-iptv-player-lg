@@ -199,6 +199,8 @@ npm install
 
 ### 在电视上调试
 
+Windows 请使用 WSL 2；不支持原生 Windows 环境。
+
 `scripts/tv.sh` 会自动读取 `ares-setup-device` 中默认设备的连接信息，
 无需在命令中手动填写密钥或密码短语。
 

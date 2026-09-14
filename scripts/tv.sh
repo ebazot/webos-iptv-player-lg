@@ -3,8 +3,9 @@
 #
 # The tv profile blocks `ares-shell` and `ares-push`, and the TV's SSH key is
 # passphrase-protected and only offers a legacy ssh-rsa host key. This pulls the
-# connection details (ip, port, user, key, passphrase) from `ares-setup-device`
-# at run time — so no secret lives in this file — and drives ssh/scp via expect.
+# connection details (ip, port, user, key, passphrase, password) from
+# `ares-setup-device` at run time — so no secret lives in this file — and drives
+# ssh/scp via expect.
 #
 # Usage:
 #   scripts/tv.sh run '<command>'         # run a shell command on the TV
@@ -49,98 +50,152 @@ let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{
   const t = a.find(x=>want ? x.name===want : x.default) || a[0];
   if(!t){ process.exit(3); }
   const di=t.deviceinfo||{}, de=t.details||{};
-  process.stdout.write([
+  const values = [
     di.ip||di.host||de.host||"",
     di.port||de.port||"",
     di.user||di.username||de.username||"",
     de.privatekey||"",
-    de.passphrase||""
-  ].join("\t"));
+    de.passphrase||"",
+    de.password||""
+  ];
+  process.stdout.write(values.map(value =>
+    "x"+Buffer.from(String(value),"utf8").toString("base64")
+  ).join("\t"));
 })') || { echo "tv.sh: no matching device${TV_DEVICE:+ '$TV_DEVICE'}" >&2; exit 1; }
-IFS=$'\t' read -r ip port user key pass <<<"$creds"
+IFS=$'\t' read -r ip_encoded port_encoded user_encoded key_encoded \
+  passphrase_encoded password_encoded <<<"$creds"
 
-[ -n "$ip" ] && [ -n "$port" ] && [ -n "$user" ] && [ -n "$key" ] \
+decode_field() {
+  TV_ENCODED="$1" node -e \
+    'process.stdout.write(Buffer.from(process.env.TV_ENCODED.slice(1),"base64").toString("utf8"))'
+}
+
+ip=$(decode_field "$ip_encoded")
+port=$(decode_field "$port_encoded")
+user=$(decode_field "$user_encoded")
+key=$(decode_field "$key_encoded")
+passphrase=$(decode_field "$passphrase_encoded")
+password=$(decode_field "$password_encoded")
+
+[ -n "$ip" ] && [ -n "$port" ] && [ -n "$user" ] \
+  && { [ -n "$key" ] || [ -n "$password" ]; } \
   || { echo "tv.sh: selected device has incomplete SSH details" >&2; exit 1; }
-case "$key" in
-  /*) key_path="$key" ;;
-  *) key_path="$HOME/.ssh/$key" ;;
-esac
+key_path=""
+if [ -n "$key" ]; then
+  case "$key" in
+    /*) key_path="$key" ;;
+    *) key_path="$HOME/.ssh/$key" ;;
+  esac
+fi
 
 export TV_KEY="$key_path" TV_PORT="$port" TV_HOST="$user@$ip" \
-       TV_PASS="$pass" TV_TIMEOUT="${TV_TIMEOUT:-120}" \
+       TV_PASSPHRASE="$passphrase" TV_PASSWORD="$password" \
+       TV_TIMEOUT="${TV_TIMEOUT:-120}" \
        TV_CONTROL_PATH="/tmp/webos-tv-%C"
 
-# Common ssh/scp options; -o LogLevel=ERROR hushes the /dev/null known-hosts note.
-# expect word-splits $env(TV_CMD) into argv and ssh re-joins it for the remote
-# shell, so `;`, `|`, and quotes in the command run on the TV, not locally.
-case "$action" in
-  run)
-    TV_CMD="${1:-}" expect <<'EOF'
+run_transport() {
+  expect <<'EOF'
 set timeout $env(TV_TIMEOUT)
-spawn -noecho ssh -i $env(TV_KEY) -p $env(TV_PORT) -o StrictHostKeyChecking=no \
-  -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
-  -o ControlMaster=auto -o ControlPersist=60 -o ControlPath=$env(TV_CONTROL_PATH) \
-  -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedKeyTypes=+ssh-rsa \
-  $env(TV_HOST) $env(TV_CMD)
+set mode $env(TV_MODE)
+set interactive [expr {$mode eq "shell"}]
+if {$interactive} { set timeout 30 }
+
+if {$mode eq "push" || $mode eq "pull"} {
+  set args [list scp -P $env(TV_PORT)]
+} else {
+  set args [list ssh -p $env(TV_PORT)]
+}
+if {[string length $env(TV_KEY)] > 0} { lappend args -i $env(TV_KEY) }
+lappend args -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+  -o LogLevel=ERROR -o ControlMaster=auto -o ControlPersist=60 \
+  -o ControlPath=$env(TV_CONTROL_PATH) -o HostKeyAlgorithms=+ssh-rsa \
+  -o PubkeyAcceptedKeyTypes=+ssh-rsa
+
+switch -- $mode {
+  run {
+    lappend args $env(TV_HOST) $env(TV_CMD)
+  }
+  push {
+    lappend args $env(TV_SRC) "$env(TV_HOST):$env(TV_DST)"
+  }
+  pull {
+    lappend args "$env(TV_HOST):$env(TV_SRC)" $env(TV_DST)
+  }
+  shell {
+    lappend args $env(TV_HOST)
+  }
+}
+spawn -noecho {*}$args
+set ready 0
 expect {
-  -re {[Pp]assphrase.*:} { send "$env(TV_PASS)\r"; exp_continue }
-  -re {[Pp]assword:}     { send "$env(TV_PASS)\r"; exp_continue }
-  eof
+  -re {[Pp]assphrase.*:} {
+    if {[string length $env(TV_PASSPHRASE)] == 0} {
+      puts stderr "tv.sh: private key passphrase required"
+      exit 1
+    }
+    log_user 0
+    send "$env(TV_PASSPHRASE)\r"
+    expect -re {\r?\n}
+    log_user 1
+    exp_continue
+  }
+  -re {[Pp]assword:} {
+    if {[string length $env(TV_PASSWORD)] == 0} {
+      puts stderr "tv.sh: login password required"
+      exit 1
+    }
+    log_user 0
+    send "$env(TV_PASSWORD)\r"
+    expect -re {\r?\n}
+    log_user 1
+    exp_continue
+  }
+  -re {[#$] $} {
+    if {$interactive} {
+      set ready 1
+    } else {
+      exp_continue
+    }
+  }
+  timeout {
+    if {$interactive} {
+      set ready 1
+    } else {
+      puts stderr "tv.sh: connection timed out"
+      exit 1
+    }
+  }
+  eof {}
+}
+
+if {$ready} {
+  interact
 }
 catch wait result
 exit [lindex $result 3]
 EOF
+}
+
+# Common ssh/scp options hush known-hosts notices and retain a short-lived
+# control connection. ssh re-joins TV_CMD for the remote shell.
+case "$action" in
+  run)
+    export TV_MODE="run" TV_CMD="${1:-}"
+    run_transport
     ;;
   push)
     [ $# -eq 2 ] || { echo "usage: tv.sh push <local> <remote>" >&2; exit 2; }
-    TV_SRC="$1" TV_DST="$2" expect <<'EOF'
-set timeout $env(TV_TIMEOUT)
-spawn -noecho scp -P $env(TV_PORT) -i $env(TV_KEY) -o StrictHostKeyChecking=no \
-  -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
-  -o ControlMaster=auto -o ControlPersist=60 -o ControlPath=$env(TV_CONTROL_PATH) \
-  -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedKeyTypes=+ssh-rsa \
-  $env(TV_SRC) $env(TV_HOST):$env(TV_DST)
-expect {
-  -re {[Pp]assphrase.*:} { send "$env(TV_PASS)\r"; exp_continue }
-  -re {[Pp]assword:}     { send "$env(TV_PASS)\r"; exp_continue }
-  eof
-}
-catch wait result
-exit [lindex $result 3]
-EOF
+    export TV_MODE="push" TV_SRC="$1" TV_DST="$2"
+    run_transport
     ;;
   pull)
     [ $# -eq 2 ] || { echo "usage: tv.sh pull <remote> <local>" >&2; exit 2; }
-    TV_SRC="$1" TV_DST="$2" expect <<'EOF'
-set timeout $env(TV_TIMEOUT)
-spawn -noecho scp -P $env(TV_PORT) -i $env(TV_KEY) -o StrictHostKeyChecking=no \
-  -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
-  -o ControlMaster=auto -o ControlPersist=60 -o ControlPath=$env(TV_CONTROL_PATH) \
-  -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedKeyTypes=+ssh-rsa \
-  $env(TV_HOST):$env(TV_SRC) $env(TV_DST)
-expect {
-  -re {[Pp]assphrase.*:} { send "$env(TV_PASS)\r"; exp_continue }
-  -re {[Pp]assword:}     { send "$env(TV_PASS)\r"; exp_continue }
-  eof
-}
-catch wait result
-exit [lindex $result 3]
-EOF
+    export TV_MODE="pull" TV_SRC="$1" TV_DST="$2"
+    run_transport
     ;;
   shell)
-    expect <<'EOF'
-set timeout 30
-spawn -noecho ssh -i $env(TV_KEY) -p $env(TV_PORT) -o StrictHostKeyChecking=no \
-  -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
-  -o ControlMaster=auto -o ControlPersist=60 -o ControlPath=$env(TV_CONTROL_PATH) \
-  -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedKeyTypes=+ssh-rsa $env(TV_HOST)
-expect {
-  -re {[Pp]assphrase.*:} { send "$env(TV_PASS)\r"; exp_continue }
-  -re {[Pp]assword:}     { send "$env(TV_PASS)\r"; exp_continue }
-  -re {[#$] $} {}
-}
-interact
-EOF
+    export TV_MODE="shell"
+    run_transport
     ;;
   *)
     echo "usage: tv.sh {run '<command>' | push <local> <remote> | pull <remote> <local> | shell | logs ... | eval '<js>' | perf ... | diag ... | capt ...}" >&2

@@ -19,6 +19,8 @@ const DEFAULT_PORT = 9998;
 const DEFAULT_TIMEOUT_MS = 30000;
 const DEFAULT_DURATION_MS = 15000;
 const PREVIEW_BYTES = 2048;
+const PLAYLIST_PROBE_TIMEOUT_MS = 5000;
+const SINGLE_CONNECTION_SKIP_REASON = 'xtream-max-connections-at-most-one';
 const SAFE_QUERY_VALUES = new Set([
   'action',
   'category_id',
@@ -418,6 +420,8 @@ export function assembleDiagnosticReport({
       contentLength: playlist.webview?.contentLength ?? '',
       bodyPreview: bodyPreview(playlist.webview?.bodyPreview),
       error: redactor.text(playlist.webview?.error ?? ''),
+      skipped: playlist.webview?.skipped ?? false,
+      skipReason: playlist.webview?.skipReason ?? '',
     },
     xtreamAuth: playlist.xtreamAuth ? {
       ...playlist.xtreamAuth,
@@ -428,6 +432,8 @@ export function assembleDiagnosticReport({
       contentType: native[index].contentType,
       bodyPreview: bodyPreview(native[index].bodyPreview),
       error: redactor.text(native[index].error),
+      skipped: native[index].skipped ?? false,
+      skipReason: native[index].skipReason ?? '',
     } : null,
   }));
   const safeLogs = logs.map((entry) => ({ ...entry, text: redactor.text(entry.text) }));
@@ -646,7 +652,11 @@ export function formatDiagnosticSummary(report) {
   return lines.join('\n');
 }
 
-export const activeProbeExpression = `(${function activeProbe(previewBytes) {
+export const activeProbeExpression = `(${function activeProbe(
+  previewBytes,
+  probeTimeoutMs,
+  singleConnectionSkipReason,
+) {
   // The containers the app hands to <source type>, plus the codecs a webOS
   // pipeline can refuse silently. A rejected type makes the resource selection
   // algorithm skip the source without firing `error` — a black screen with no
@@ -693,8 +703,13 @@ export const activeProbeExpression = `(${function activeProbe(previewBytes) {
     return new TextDecoder().decode(bytes);
   };
   const fetchProbe = async (url) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), probeTimeoutMs);
     try {
-      const response = await fetch(url);
+      const response = await fetch(url, {
+        headers: { Range: `bytes=0-${String(previewBytes - 1)}` },
+        signal: controller.signal,
+      });
       return {
         status: response.status,
         contentType: response.headers.get('content-type') || '',
@@ -704,6 +719,8 @@ export const activeProbeExpression = `(${function activeProbe(previewBytes) {
       };
     } catch (error) {
       return { status: null, contentType: '', contentLength: '', bodyPreview: '', error: String(error) };
+    } finally {
+      clearTimeout(timeout);
     }
   };
   return (async () => {
@@ -715,6 +732,7 @@ export const activeProbeExpression = `(${function activeProbe(previewBytes) {
       if (entry.source === 'upload') continue;
       let url = entry.url || '';
       let xtreamAuth = null;
+      let isolateSingleConnection = false;
       const secrets = [];
       if (entry.source === 'xtream' && entry.xtream) {
         const username = entry.xtream.username || '';
@@ -740,6 +758,12 @@ export const activeProbeExpression = `(${function activeProbe(previewBytes) {
         } catch (error) {
           xtreamAuth = { error: String(error) };
         }
+        const maxConnectionsValue = xtreamAuth && xtreamAuth.maxConnections;
+        const maxConnections = maxConnectionsValue != null
+          && String(maxConnectionsValue).trim() !== ''
+          ? Number(maxConnectionsValue)
+          : NaN;
+        isolateSingleConnection = Number.isFinite(maxConnections) && maxConnections <= 1;
         const preferred = entry.xtream.liveOutput === 'm3u8'
           || (entry.xtream.liveOutput === 'auto'
             && xtreamAuth
@@ -753,8 +777,19 @@ export const activeProbeExpression = `(${function activeProbe(previewBytes) {
         name: entry.name || '',
         __url: url,
         __secrets: secrets,
-        webview: await fetchProbe(url),
+        webview: isolateSingleConnection
+          ? {
+            status: null,
+            contentType: '',
+            contentLength: '',
+            bodyPreview: '',
+            error: '',
+            skipped: true,
+            skipReason: singleConnectionSkipReason,
+          }
+          : await fetchProbe(url),
         xtreamAuth,
+        __skipNativeProbe: isolateSingleConnection ? singleConnectionSkipReason : '',
       });
     }
     let storageEstimate = {};
@@ -829,7 +864,8 @@ export const activeProbeExpression = `(${function activeProbe(previewBytes) {
       playlists,
     };
   })();
-}.toString()})(${String(PREVIEW_BYTES)})`;
+}.toString()})(${String(PREVIEW_BYTES)},${String(PLAYLIST_PROBE_TIMEOUT_MS)},`
+  + `${JSON.stringify(SINGLE_CONNECTION_SKIP_REASON)})`;
 
 export const snapshotProbeExpression = `(${function snapshotProbe() {
   const source = (() => {
@@ -1436,14 +1472,21 @@ export function runNativeProbe(url, { execFile = execFileSync } = {}) {
     'if [ "$node_major" -ge 20 ]; then temp_root=/media/developer/temp; else temp_root=/tmp; fi',
     'body="$temp_root/iptv-diag-body-$$"',
     'headers="$temp_root/iptv-diag-headers-$$"',
-    `curl -L -sS --connect-timeout 10 --max-time 20 --range 0-${String(PREVIEW_BYTES - 1)}`
-      + ` -D "$headers" -o "$body" ${shellQuote(url)}`,
-    'rc=$?',
-    `head -c ${String(PREVIEW_BYTES)} "$body" 2>/dev/null`,
+    'curl_error="$temp_root/iptv-diag-curl-error-$$"',
+    'curl_rc="$temp_root/iptv-diag-curl-rc-$$"',
+    `(curl -L -sS --connect-timeout 10 --max-time 20`
+      + ` --range 0-${String(PREVIEW_BYTES - 1)} -D "$headers" ${shellQuote(url)}`
+      + ` 2>"$curl_error"; printf '%s' "$?" > "$curl_rc")`
+      + ` | head -c ${String(PREVIEW_BYTES)} > "$body"`,
+    'rc=$(cat "$curl_rc" 2>/dev/null || printf 1)',
+    `size=$(wc -c < "$body" 2>/dev/null || printf 0)`,
+    `if [ "$rc" -eq 23 ] && [ "$size" -eq ${String(PREVIEW_BYTES)} ]; then rc=0; fi`,
+    'if [ "$rc" -ne 0 ]; then cat "$curl_error" >&2; fi',
+    'cat "$body" 2>/dev/null',
     'status=$(awk \'/^HTTP\\// {code=$2} END {print code}\' "$headers" 2>/dev/null)',
     'content_type=$(awk \'BEGIN {IGNORECASE=1} /^Content-Type:/ {sub(/^[^:]*:[[:space:]]*/, ""); sub(/\\r$/, ""); value=$0} END {print value}\' "$headers" 2>/dev/null)',
     'printf \'\\n__IPTV_DIAG__%s|%s\' "$status" "$content_type"',
-    'rm -f "$body" "$headers"',
+    'rm -f "$body" "$headers" "$curl_error" "$curl_rc"',
     'exit $rc',
   ].join('; ');
   try {
@@ -1469,6 +1512,20 @@ export function runNativeProbe(url, { execFile = execFileSync } = {}) {
     const text = String(detail).trim() || toErrorMessage(error);
     return { status: null, contentType: '', bodyPreview: '', error: text };
   }
+}
+
+export function runNativePlaylistProbe(playlist, options = {}) {
+  if (playlist?.__skipNativeProbe) {
+    return {
+      status: null,
+      contentType: '',
+      bodyPreview: '',
+      error: '',
+      skipped: true,
+      skipReason: playlist.__skipNativeProbe,
+    };
+  }
+  return runNativeProbe(playlist?.__url, options);
 }
 
 async function pollForTarget(options, dependencies) {
@@ -1608,7 +1665,7 @@ export async function captureDiagnostics(options, overrides = {}) {
     };
     const native = capture.complete
       ? effectiveProbe.playlists.map((playlist) =>
-        runNativeProbe(playlist.__url, { execFile: dependencies.execFile }))
+        runNativePlaylistProbe(playlist, { execFile: dependencies.execFile }))
       : effectiveProbe.playlists.map(() => null);
     return assembleDiagnosticReport({
       capturedAt: dependencies.now().toISOString(),

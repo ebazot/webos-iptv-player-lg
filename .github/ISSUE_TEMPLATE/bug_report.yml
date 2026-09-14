@@ -139,6 +139,8 @@ body:
       value: |
         ### Generate the required diagnostic report
 
+        On Windows, use WSL 2; native Windows is not supported.
+
         A diagnostic report is required. Reproduce the bug while running the
         command below:
 

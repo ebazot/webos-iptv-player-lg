@@ -1,8 +1,12 @@
 // @vitest-environment jsdom
 // jsdom, because the active probe is stringified and evaluated inside the
 // TV's webview; every other case here is a pure function.
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import {
   DiagnosticRedactor,
   assembleDiagnosticReport,
@@ -17,6 +21,7 @@ import {
   snapshotProbeExpression,
   formatDiagnosticSummary,
   runNativeProbe,
+  runNativePlaylistProbe,
   inspectorWebSocketUrl,
   startAresInspector,
   startNativeMetricWindow,
@@ -341,12 +346,49 @@ describe('diagnostic report assembly', () => {
     });
     expect(command).toContain('temp_root=/media/developer/temp');
     expect(command).toContain('temp_root=/tmp');
+    expect(command).toContain('--range 0-2047');
+    expect(command).toContain('| head -c 2048 > "$body"');
+    expect(command).toContain('[ "$rc" -eq 23 ] && [ "$size" -eq 2048 ]');
+    expect(command).not.toContain('-o "$body"');
     expect(result).toEqual({
       status: 206,
       contentType: 'text/plain',
       bodyPreview: '#EXTM3U',
       error: '',
     });
+  });
+
+  it('bounds native previews when the server ignores Range', () => {
+    const bin = mkdtempSync(path.join(tmpdir(), 'tv-diag-native-'));
+    try {
+      writeFileSync(path.join(bin, 'node'), '#!/bin/sh\nprintf 12\n', { mode: 0o755 });
+      writeFileSync(path.join(bin, 'curl'), `#!/bin/sh
+headers=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -D) headers="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf 'HTTP/1.1 200 OK\\r\\nContent-Type: text/plain\\r\\nContent-Length: 10485760\\r\\n\\r\\n' > "$headers"
+head -c 10485760 /dev/zero
+exit 23
+`, { mode: 0o755 });
+
+      const result = runNativeProbe('http://host/a', {
+        execFile: (_file, args, options) => execFileSync('/bin/sh', ['-c', args[1]], {
+          ...options,
+          env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+        }),
+      });
+
+      expect(result.status).toBe(200);
+      expect(result.contentType).toBe('text/plain');
+      expect(result.bodyPreview).toHaveLength(2048);
+      expect(result.error).toBe('');
+    } finally {
+      rmSync(bin, { recursive: true, force: true });
+    }
   });
 
   it('normalizes network events without request headers', () => {
@@ -792,6 +834,14 @@ describe('active diagnostics probe', () => {
     window.fetch = () => Promise.reject(new Error('offline'));
   });
 
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const appInfoResponse = {
+    json: async () => ({ id: 'app.id', version: '1.0.0' }),
+  };
+
   it('takes a local snapshot without fetching playlist endpoints', async () => {
     localStorage.setItem('iptv_playlists', JSON.stringify([{
       source: 'm3u',
@@ -824,6 +874,129 @@ describe('active diagnostics probe', () => {
 
     expect(probe.state.channelsRendered).toBe(2);
     expect(probe.state).not.toHaveProperty('channels');
+  });
+
+  it('bounds playlist previews with an exact range and cancels ignored ranges', async () => {
+    localStorage.setItem('iptv_playlists', JSON.stringify([{
+      source: 'm3u',
+      name: 'Alpha',
+      url: 'http://host/playlist.m3u',
+    }]));
+    const cancel = vi.fn(async () => {});
+    const fetches = [];
+    window.fetch = async (url, init) => {
+      fetches.push({ url: String(url), init });
+      if (String(url) === 'appinfo.json') return appInfoResponse;
+      return {
+        status: 200,
+        headers: {
+          get: (name) => ({
+            'content-type': 'audio/x-mpegurl',
+            'content-length': '9000',
+          })[name] || null,
+        },
+        body: {
+          getReader: () => ({
+            read: async () => ({
+              done: false,
+              value: new TextEncoder().encode(`#EXTM3U\n${'a'.repeat(4096)}`),
+            }),
+            cancel,
+          }),
+        },
+      };
+    };
+
+    const probe = await runProbe();
+
+    expect(fetches).toHaveLength(2);
+    expect(fetches[1].init.headers).toEqual({ Range: 'bytes=0-2047' });
+    expect(fetches[1].init.signal).toBeInstanceOf(AbortSignal);
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(probe.playlists[0].webview).toMatchObject({
+      status: 200,
+      contentType: 'audio/x-mpegurl',
+      contentLength: '9000',
+    });
+    expect(probe.playlists[0].webview.bodyPreview).toHaveLength(2048);
+  });
+
+  it('aborts a timed-out playlist probe without retrying', async () => {
+    vi.useFakeTimers();
+    localStorage.setItem('iptv_playlists', JSON.stringify([{
+      source: 'm3u',
+      name: 'Alpha',
+      url: 'http://host/playlist.m3u',
+    }]));
+    let playlistFetches = 0;
+    window.fetch = (url, init) => {
+      if (String(url) === 'appinfo.json') return Promise.resolve(appInfoResponse);
+      playlistFetches++;
+      return new Promise((_resolve, reject) => {
+        init.signal.addEventListener('abort', () => reject(new Error('probe timed out')));
+      });
+    };
+
+    const pending = runProbe();
+    await vi.advanceTimersByTimeAsync(5000);
+    const probe = await pending;
+
+    expect(playlistFetches).toBe(1);
+    expect(probe.playlists[0].webview).toMatchObject({
+      status: null,
+      bodyPreview: '',
+      error: 'Error: probe timed out',
+    });
+  });
+
+  it('skips webview and native playlist probes for one-connection accounts', async () => {
+    localStorage.setItem('iptv_playlists', JSON.stringify([{
+      source: 'xtream',
+      name: 'Alpha',
+      url: 'http://host',
+      xtream: { username: 'user1', password: 'pass1', liveOutput: 'auto' },
+    }]));
+    const urls = [];
+    window.fetch = async (url) => {
+      urls.push(String(url));
+      if (String(url) === 'appinfo.json') return appInfoResponse;
+      return {
+        status: 200,
+        json: async () => ({
+          user_info: {
+            auth: 1,
+            max_connections: '1',
+            allowed_output_formats: ['m3u8'],
+          },
+        }),
+      };
+    };
+
+    const probe = await runProbe();
+    const execFile = vi.fn();
+    const native = runNativePlaylistProbe(probe.playlists[0], { execFile });
+
+    expect(urls).toHaveLength(2);
+    expect(urls[1]).toContain('/player_api.php?');
+    expect(urls.join(' ')).not.toContain('/get.php?');
+    expect(probe.playlists[0].webview).toEqual({
+      status: null,
+      contentType: '',
+      contentLength: '',
+      bodyPreview: '',
+      error: '',
+      skipped: true,
+      skipReason: 'xtream-max-connections-at-most-one',
+    });
+    expect(native).toMatchObject({
+      skipped: true,
+      skipReason: 'xtream-max-connections-at-most-one',
+    });
+    expect(execFile).not.toHaveBeenCalled();
+    expect(JSON.stringify({ webview: probe.playlists[0].webview, native }))
+      .not.toContain('user1');
+    expect(JSON.stringify({ webview: probe.playlists[0].webview, native }))
+      .not.toContain('pass1');
   });
 
   it('captures each <source> type with its canPlayType verdict', async () => {
