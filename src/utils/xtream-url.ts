@@ -145,15 +145,16 @@ export function xtreamVodStreamKind(url: string): XtreamVodStreamKind | null {
 
 /** Xtream archive URL template. Duration is in minutes; start is provider-local
  *  wall-clock time and is resolved when the EPG program is selected. */
-// TODO(cleanup, post-1.13.0): remove after all callers use xtreamCatchupSources.
-export function xtreamCatchupSource(c: XtreamCredentials, streamId: string): string {
-  return xtreamCatchupSources(c, streamId, 'ts')[0].url;
-}
-
-/** Legacy Xtream archive template used by panels without the path-form route. */
-// TODO(cleanup, post-1.13.0): remove after all callers use xtreamCatchupSources.
-export function xtreamCatchupFallbackSource(c: XtreamCredentials, streamId: string): string {
-  return xtreamCatchupSources(c, streamId, 'ts')[3].url;
+export function xtreamCatchupSource(
+  c: XtreamCredentials,
+  streamId: string,
+  output: XtreamLiveOutput = 'ts',
+): string {
+  const base = normalizeXtreamBaseUrl(c.baseUrl);
+  const username = encodeURIComponent(c.username);
+  const password = encodeURIComponent(c.password);
+  const id = encodeURIComponent(streamId);
+  return `${base}/timeshift/${username}/${password}/{duration}/{start}/${id}.${output}`;
 }
 
 /** Ordered timeshift variants used by incompatible Xtream panel families. */

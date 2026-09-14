@@ -8,7 +8,6 @@ import {
   xtreamVodUrl,
   xtreamEpisodeUrl,
   xtreamCatchupSource,
-  xtreamCatchupFallbackSource,
   xtreamCatchupSources,
   xtreamCredentialsFromLiveUrl,
   xtreamLiveStreamId,
@@ -217,6 +216,24 @@ describe('Xtream catch-up URLs', () => {
     ]);
   });
 
+  it('encodes parameters in legacy PHP catch-up candidates', () => {
+    const candidate = xtreamCatchupSources(
+      { baseUrl: 'http://host', username: 'u 1', password: 'p&1' },
+      '42',
+      'ts',
+    )[3];
+    const url = new URL(candidate.url);
+
+    expect(candidate.kind).toBe('legacy-ts');
+    expect(url.pathname).toBe('/streaming/timeshift.php');
+    expect(url.searchParams.get('username')).toBe('u 1');
+    expect(url.searchParams.get('password')).toBe('p&1');
+    expect(url.searchParams.get('stream')).toBe('42');
+    expect(url.searchParams.get('start')).toBe('{start}');
+    expect(url.searchParams.get('duration')).toBe('{duration}');
+    expect(url.searchParams.get('extension')).toBe('ts');
+  });
+
   it('puts HLS candidates first when HLS is selected', () => {
     expect(xtreamCatchupSources(creds, '42', 'm3u8').map(source => source.kind))
       .toEqual([
@@ -234,16 +251,11 @@ describe('Xtream catch-up URLs', () => {
       { baseUrl: 'http://host', username: 'u 1', password: 'p/1' },
       '42',
     )).toBe('http://host/timeshift/u%201/p%2F1/{duration}/{start}/42.ts');
-  });
-
-  it('builds the legacy PHP fallback template with encoded parameters', () => {
-    expect(xtreamCatchupFallbackSource(
-      { baseUrl: 'http://host', username: 'u 1', password: 'p&1' },
+    expect(xtreamCatchupSource(
+      { baseUrl: 'http://host', username: 'u 1', password: 'p/1' },
       '42',
-    )).toBe(
-      'http://host/streaming/timeshift.php?username=u%201&password=p%261&stream=42' +
-      '&start={start}&duration={duration}&extension=ts',
-    );
+      'm3u8',
+    )).toBe('http://host/timeshift/u%201/p%2F1/{duration}/{start}/42.m3u8');
   });
 
   it('extracts ids from standard and query-based live URLs', () => {

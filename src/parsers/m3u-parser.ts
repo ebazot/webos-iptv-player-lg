@@ -6,7 +6,7 @@ import type {
 } from '../types';
 import { UNCATEGORIZED_GROUP } from '../types';
 import {
-  xtreamCatchupSources,
+  xtreamCatchupSource,
   xtreamCredentialsFromLiveUrl,
 } from '../utils/xtream-url';
 import { isMpdText } from '../utils/url';
@@ -174,15 +174,12 @@ export function parseM3U(
         if (current.catchup.toLowerCase() === 'xc' && !current.catchupSource) {
           const inferred = xtreamCredentialsFromLiveUrl(line);
           if (inferred) {
-            const sources = xtreamCatchupSources(
+            current.catchupSource = xtreamCatchupSource(
               inferred.credentials,
               inferred.streamId,
               inferred.output,
             );
             current.catchup = 'xtream';
-            current.catchupSource = sources[0].url;
-            current.catchupFallbackSource = sources[3].url;
-            current.catchupSources = sources;
             current.catchupStreamId = inferred.streamId;
           }
         }

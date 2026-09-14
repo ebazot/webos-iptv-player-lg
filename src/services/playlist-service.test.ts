@@ -540,30 +540,12 @@ http://host/series/u1/p1/301.mkv`);
       catchup: 'xtream',
       catchupDays: 7,
       catchupSource: 'http://host:8080/timeshift/u1/p1/{duration}/{start}/101.ts',
-      catchupFallbackSource: 'http://host:8080/streaming/timeshift.php?username=u1&password=p1' +
-        '&stream=101&start={start}&duration={duration}&extension=ts',
-      catchupSources: [
-        {
-          kind: 'path-ts',
-          url: 'http://host:8080/timeshift/u1/p1/{duration}/{start}/101.ts',
-        },
-        {
-          kind: 'path-bare',
-          url: 'http://host:8080/timeshift/u1/p1/{duration}/{start}/101',
-        },
-        {
-          kind: 'path-hls',
-          url: 'http://host:8080/timeshift/u1/p1/{duration}/{start}/101.m3u8',
-        },
-        expect.objectContaining({ kind: 'legacy-ts' }),
-        expect.objectContaining({ kind: 'legacy-bare' }),
-        expect.objectContaining({ kind: 'legacy-hls' }),
-      ],
       catchupAccountId: 'x',
       catchupStreamId: '101',
       catchupTimeZone: 'Etc/GMT-2',
       catchupTimeOffsetMinutes: 120,
     });
+    expect(channels[0].catchupSources).toBeUndefined();
     expect(channels[1].catchupSource).toBe('');
   });
 

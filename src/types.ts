@@ -42,10 +42,8 @@ export interface Channel {
   playlistIds: string[];
   catchup: string;
   catchupSource: string;
-  // TODO(cleanup, post-1.13.0): remove after cached channels all carry catchupSources.
-  /** Alternate legacy endpoint used when an Xtream path-form timeshift fails. */
-  catchupFallbackSource?: string;
-  /** Ordered, bounded Xtream endpoint variants attempted for this channel. */
+  // TODO(cleanup, post-1.15.0): remove after legacy playlist caches have expired.
+  /** Legacy cached field; new Xtream channels derive endpoint variants on demand. */
   catchupSources?: XtreamCatchupSource[];
   /** Xtream account and stream identity used for program-level archive checks. */
   catchupAccountId?: string;

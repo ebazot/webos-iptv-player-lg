@@ -31,6 +31,13 @@ vi.mock('../services/storage-service', () => ({
     touchRecentlyWatchedLive: vi.fn(),
     getSubtitleOffset: vi.fn(() => 0), setSubtitleOffset: vi.fn(),
     getChannelCycleMode: vi.fn(() => 'global'),
+    getPlaylists: vi.fn(() => [{
+      id: 'x',
+      name: 'Account',
+      url: 'http://host',
+      source: 'xtream',
+      xtream: { username: 'u1', password: 'p1', liveOutput: 'auto' },
+    }]),
   },
 }));
 vi.mock('./toast', () => ({ showToast: vi.fn() }));
@@ -68,8 +75,6 @@ const XTREAM_CHANNEL = {
   ...CHANNEL,
   catchup: 'xtream',
   catchupSource: 'http://host/timeshift/u1/p1/{duration}/{start}/42.ts',
-  catchupFallbackSource: 'http://host/streaming/timeshift.php?username=u1&password=p1' +
-    '&stream=42&start={start}&duration={duration}&extension=ts',
   catchupSources: [
     {
       kind: 'path-ts' as const,
@@ -85,6 +90,15 @@ const XTREAM_CHANNEL = {
         + '&stream=42&start={start}&duration={duration}&extension=ts',
     },
   ],
+  catchupTimeZone: 'America/New_York',
+};
+const DERIVED_XTREAM_CHANNEL = {
+  ...CHANNEL,
+  url: 'https://stream-host/token/42',
+  catchup: 'xtream',
+  catchupSource: 'http://host/timeshift/u1/p1/{duration}/{start}/42.m3u8',
+  catchupAccountId: 'x',
+  catchupStreamId: '42',
   catchupTimeZone: 'America/New_York',
 };
 // 120-second catch-up programme.
@@ -428,8 +442,29 @@ describe('Player catch-up pause/play', () => {
 });
 
 describe('Player catch-up completion', () => {
+  it('derives Xtream catch-up candidates only when playback needs them', () => {
+    const internals = player as unknown as {
+      xtreamCatchupSources: (channel: typeof DERIVED_XTREAM_CHANNEL) =>
+        Array<{ kind: string; url: string }>;
+    };
+
+    const sources = internals.xtreamCatchupSources(DERIVED_XTREAM_CHANNEL);
+
+    expect(sources.map(source => source.kind)).toEqual([
+      'path-hls',
+      'path-bare',
+      'path-ts',
+      'legacy-hls',
+      'legacy-bare',
+      'legacy-ts',
+    ]);
+    expect(sources[0].url)
+      .toBe('http://host/timeshift/u1/p1/{duration}/{start}/42.m3u8');
+    expect(DERIVED_XTREAM_CHANNEL).not.toHaveProperty('catchupSources');
+  });
+
   it('resolves an Xtream timeshift URL in the provider timezone', async () => {
-    playlistMock.getByIndex.mockReturnValue(XTREAM_CHANNEL);
+    playlistMock.getByIndex.mockReturnValue(DERIVED_XTREAM_CHANNEL);
     const start = Date.UTC(2026, 6, 21, 19, 30) / 1000;
     player.play(0, {
       ...CATCHUP,
@@ -438,7 +473,7 @@ describe('Player catch-up completion', () => {
     });
     await flush();
     expect(video.src)
-      .toContain('/timeshift/u1/p1/62/2026-07-21:15-30/42.ts');
+      .toContain('/timeshift/u1/p1/62/2026-07-21:15-30/42.m3u8');
   });
 
   it('tries each Xtream catch-up candidate once in order', async () => {

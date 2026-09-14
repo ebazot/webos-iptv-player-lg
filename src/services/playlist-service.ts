@@ -11,7 +11,7 @@ import { fetchPlaylistText } from '../utils/fetch-helper';
 import {
   xtreamPlaylistUrl,
   xtreamEpgUrl,
-  xtreamCatchupSources,
+  xtreamCatchupSource,
   xtreamLiveUrl,
   xtreamLiveStreamId,
   xtreamVodStreamKind,
@@ -436,11 +436,8 @@ class PlaylistServiceImpl {
       channel.catchupStreamId = streamId;
       channel.catchupAccountId = accountId;
       if (!channel.catchupSource) {
-        const sources = xtreamCatchupSources(credentials, streamId, output);
         channel.catchup = 'xtream';
-        channel.catchupSource = sources[0].url;
-        channel.catchupFallbackSource = sources[3].url;
-        channel.catchupSources = sources;
+        channel.catchupSource = xtreamCatchupSource(credentials, streamId, output);
         channel.catchupDays = stream.archiveDurationDays;
         enabled++;
       }

@@ -72,14 +72,7 @@ describe('parseM3U', () => {
       catchupStreamId: '42',
       catchupSource: 'http://host:8080/timeshift/u1/p1/{duration}/{start}/42.m3u8',
     });
-    expect(channel.catchupSources?.map(source => source.kind)).toEqual([
-      'path-hls',
-      'path-bare',
-      'path-ts',
-      'legacy-hls',
-      'legacy-bare',
-      'legacy-ts',
-    ]);
+    expect(channel.catchupSources).toBeUndefined();
   });
 
   it('keeps an explicit catchup-source instead of inferring catchup=xc', () => {

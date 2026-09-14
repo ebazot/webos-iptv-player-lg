@@ -8,8 +8,13 @@ import type {
   SubtitleTrackOption,
   VodPlayback,
   VodQueueItem,
+  XtreamCatchupSource,
 } from '../types';
-import { formatXtreamCatchupStart } from '../utils/xtream-url';
+import {
+  formatXtreamCatchupStart,
+  xtreamCatchupSources as buildXtreamCatchupSources,
+  xtreamCredentialsFromLiveUrl,
+} from '../utils/xtream-url';
 import { show, hide } from '../utils/dom';
 import { channelKey } from '../utils/channel';
 import { dvrWindow, dvrState, type DvrWindow } from '../utils/dvr';
@@ -361,12 +366,24 @@ export class Player {
 
   // Resolve the playable URL for a channel, applying the catch-up template when
   // a catch-up window is active. Shared by play() and the stall reload path.
-  private xtreamCatchupSources(channel: Channel): Array<{ kind: string; url: string }> {
+  private xtreamCatchupSources(channel: Channel): XtreamCatchupSource[] {
     if (channel.catchupSources?.length) return channel.catchupSources;
-    const sources = [{ kind: 'path-ts', url: channel.catchupSource }];
-    if (channel.catchupFallbackSource) {
-      sources.push({ kind: 'legacy-ts', url: channel.catchupFallbackSource });
+    const inferred = xtreamCredentialsFromLiveUrl(channel.url);
+    const account = channel.catchupAccountId
+      ? StorageService.getPlaylists()
+          .find(item => item.id === channel.catchupAccountId && item.source === 'xtream')
+      : undefined;
+    const credentials = account?.xtream
+      ? { baseUrl: account.url, ...account.xtream }
+      : inferred?.credentials;
+    const streamId = channel.catchupStreamId || inferred?.streamId || '';
+    if (credentials && streamId) {
+      const output = /\.m3u8(?:[?#]|$)/i.test(channel.catchupSource) ? 'm3u8' : 'ts';
+      return buildXtreamCatchupSources(credentials, streamId, output);
     }
+    const sources: XtreamCatchupSource[] = [
+      { kind: 'path-ts', url: channel.catchupSource },
+    ];
     return sources;
   }
 
