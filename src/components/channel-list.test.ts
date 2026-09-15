@@ -521,6 +521,17 @@ describe('ChannelList interaction', () => {
     expect(onSelect).toHaveBeenCalledWith(0, undefined, { group: 'builtin:all', playlist: undefined });
   });
 
+  it('does not rerender when the next virtual item is already mounted', () => {
+    const render = vi.spyOn(list, 'render');
+
+    expect(list.handleAction('down')).toBe(true);
+    expect(render).not.toHaveBeenCalled();
+
+    hover(container.querySelector<HTMLElement>('[data-group-position="0"]')!);
+    expect(list.handleAction('down')).toBe(true);
+    expect(render).not.toHaveBeenCalled();
+  });
+
   it('selecting a recent live row starts live playback', () => {
     recentMock.items = [{
       kind: 'live',

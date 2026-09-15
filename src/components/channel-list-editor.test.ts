@@ -669,6 +669,25 @@ describe('ChannelList edit mode', () => {
     expect(input.dataset.searchQuery).toBe('Guide B');
   });
 
+  it('reuses the selected channel while the EPG mapping query changes', async () => {
+    const indexOfKey = vi.spyOn(playlistMock, 'indexOfKey');
+    enterEdit();
+    hover(channelItems()[1]);
+    list.handleAction('select');
+    hover(container.querySelector<HTMLElement>('[data-epg-action]')!);
+    list.handleAction('select');
+    await waitForEpgSearch();
+    indexOfKey.mockClear();
+
+    const input = container.querySelector<HTMLInputElement>('.epg-mapping-search')!;
+    input.value = 'Guide B';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    await waitForEpgSearch();
+
+    expect(indexOfKey).not.toHaveBeenCalled();
+    indexOfKey.mockRestore();
+  });
+
   it('closes the EPG picker when Escape originates from the search input', () => {
     enterEdit();
     hover(channelItems()[0]);

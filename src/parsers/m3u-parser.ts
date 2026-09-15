@@ -21,6 +21,7 @@ export interface M3UParseOptions {
 
 const DEFAULT_MAX_ISSUES = 500;
 const SAMPLE_CHARS = 64 * 1024;
+const STRING_DETACH_BATCH_SIZE = 512;
 
 export function parseM3U(
   input: string,
@@ -28,7 +29,7 @@ export function parseM3U(
   options: M3UParseOptions = {},
 ): ParsedPlaylist {
   const parser = new M3UStreamParser(sourceUrl, options);
-  parser.write(input);
+  parser.writeComplete(input);
   return parser.finish();
 }
 
@@ -37,6 +38,7 @@ export class M3UStreamParser {
   private readonly channels: Channel[] = [];
   private readonly groupSet = new Set<string>();
   private readonly groupPool = new Map<string, string>();
+  private readonly pendingStringDetach: Channel[] = [];
   private readonly issues: PlaylistParseIssue[] = [];
   private readonly maxIssues: number;
   private readonly maxChannels: number;
@@ -77,6 +79,31 @@ export class M3UStreamParser {
     this.lineBuffer += chunk;
     this.drainLines(false);
     if (!this.detection && this.sample.length >= SAMPLE_CHARS) this.activate();
+  }
+
+  writeComplete(input: string): void {
+    if (this.finished) throw new Error('M3U parser is already finished');
+    if (this.lineBuffer || this.pendingLines.length || this.detection) {
+      throw new Error('M3U parser already contains streamed input');
+    }
+    this.sample = input.slice(0, SAMPLE_CHARS);
+    this.detection = detectPlaylistFormat(this.sample);
+    let position = 0;
+    while (position < input.length && !this.stopped) {
+      const lineStart = position;
+      while (position < input.length) {
+        const code = input.charCodeAt(position);
+        if (code === 10 || code === 13) break;
+        position++;
+      }
+      this.processLine(input.slice(lineStart, position));
+      if (position < input.length && input.charCodeAt(position) === 13
+          && input.charCodeAt(position + 1) === 10) {
+        position += 2;
+      } else if (position < input.length) {
+        position++;
+      }
+    }
   }
 
   finish(): ParsedPlaylist {
@@ -145,6 +172,7 @@ export class M3UStreamParser {
     if (!this.acceptedChannels) {
       this.addIssue('error', 'no-channels', 'No playable entries were found', 1);
     }
+    this.detachPendingChannelStrings();
     this.flushChannelBatch();
 
     return result(
@@ -301,10 +329,13 @@ export class M3UStreamParser {
     if (channel.sourceGroups) {
       channel.sourceGroups = channel.sourceGroups.map(group => this.internGroup(group));
     }
-    detachChannelStrings(channel);
     if (channel.group) this.groupSet.add(channel.group);
     for (const group of channel.sourceGroups ?? []) this.groupSet.add(group);
     this.channels.push(channel);
+    this.pendingStringDetach.push(channel);
+    if (this.pendingStringDetach.length >= STRING_DETACH_BATCH_SIZE) {
+      this.detachPendingChannelStrings();
+    }
     this.acceptedChannels++;
     if (this.onChannelBatch
         && this.channelBatchSize > 0
@@ -324,8 +355,15 @@ export class M3UStreamParser {
 
   private flushChannelBatch(): void {
     if (!this.onChannelBatch || !this.channels.length) return;
+    this.detachPendingChannelStrings();
     const batch = this.channels.splice(0);
     this.onChannelBatch(batch);
+  }
+
+  private detachPendingChannelStrings(): void {
+    if (!this.pendingStringDetach.length) return;
+    detachChannelStrings(this.pendingStringDetach);
+    this.pendingStringDetach.length = 0;
   }
 
   private addIssue(
@@ -385,25 +423,61 @@ const OPTIONAL_CHANNEL_STRING_KEYS = [
   'catchupTimeZone',
 ] as const;
 
-function detachChannelStrings(channel: Channel): void {
-  const optionalKeys = OPTIONAL_CHANNEL_STRING_KEYS
-    .filter(key => typeof channel[key] === 'string');
-  const extraKeys = channel.extras ? Object.keys(channel.extras) : [];
-  const attributeKeys = channel.sourceAttributes ? Object.keys(channel.sourceAttributes) : [];
-  const headerKeys = channel.httpHeaders ? Object.keys(channel.httpHeaders) : [];
+function detachChannelStrings(channels: readonly Channel[]): void {
   const values: string[] = [];
-  for (const key of CHANNEL_STRING_KEYS) values.push(channel[key]);
-  for (const key of optionalKeys) values.push(channel[key]!);
-  for (const key of extraKeys) values.push(channel.extras![key]);
-  for (const key of attributeKeys) values.push(channel.sourceAttributes![key]);
-  for (const key of headerKeys) values.push(channel.httpHeaders![key]);
+  for (const channel of channels) {
+    for (const key of CHANNEL_STRING_KEYS) {
+      if (channel[key]) values.push(channel[key]);
+    }
+    for (const key of OPTIONAL_CHANNEL_STRING_KEYS) {
+      if (channel[key]) values.push(channel[key]!);
+    }
+    if (channel.extras) {
+      for (const key of Object.keys(channel.extras)) {
+        const value = channel.extras[key];
+        if (value) values.push(value);
+      }
+    }
+    if (channel.sourceAttributes) {
+      for (const key of Object.keys(channel.sourceAttributes)) {
+        const value = channel.sourceAttributes[key];
+        if (value) values.push(value);
+      }
+    }
+    if (channel.httpHeaders) {
+      for (const key of Object.keys(channel.httpHeaders)) {
+        const value = channel.httpHeaders[key];
+        if (value) values.push(value);
+      }
+    }
+  }
   const copies = copyRetainedStrings(values);
   let index = 0;
-  for (const key of CHANNEL_STRING_KEYS) channel[key] = copies[index++];
-  for (const key of optionalKeys) channel[key] = copies[index++];
-  for (const key of extraKeys) channel.extras![key] = copies[index++];
-  for (const key of attributeKeys) channel.sourceAttributes![key] = copies[index++];
-  for (const key of headerKeys) channel.httpHeaders![key] = copies[index++];
+  for (const channel of channels) {
+    for (const key of CHANNEL_STRING_KEYS) {
+      if (channel[key]) channel[key] = copies[index++];
+    }
+    for (const key of OPTIONAL_CHANNEL_STRING_KEYS) {
+      if (channel[key]) channel[key] = copies[index++];
+    }
+    if (channel.extras) {
+      for (const key of Object.keys(channel.extras)) {
+        if (channel.extras[key]) channel.extras[key] = copies[index++];
+      }
+    }
+    if (channel.sourceAttributes) {
+      for (const key of Object.keys(channel.sourceAttributes)) {
+        if (channel.sourceAttributes[key]) {
+          channel.sourceAttributes[key] = copies[index++];
+        }
+      }
+    }
+    if (channel.httpHeaders) {
+      for (const key of Object.keys(channel.httpHeaders)) {
+        if (channel.httpHeaders[key]) channel.httpHeaders[key] = copies[index++];
+      }
+    }
+  }
 }
 
 function copyRetainedStrings(values: readonly string[]): string[] {

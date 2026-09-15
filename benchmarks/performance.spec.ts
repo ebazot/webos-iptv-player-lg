@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Browser } from '@playwright/test';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { readFile } from 'node:fs/promises';
 import { gzipSync } from 'node:zlib';
@@ -21,6 +21,7 @@ import {
   installUniqueGroupFixture,
   inspectPointerBenchmark,
   measureStartupHoverBenchmark,
+  measureLargePlaylistMemory,
   preparePointerBenchmark,
   rebuildBenchmarkDatabase,
   runGroupBenchmark,
@@ -46,9 +47,44 @@ const FIXTURE = {
 };
 const COLD_PLAYLIST_URL = 'http://host/cold-list.m3u';
 const XMLTV_PIPELINE_URL = 'http://host/benchmark-guide.xml.gz';
+const LARGE_PLAYLIST_ENTRIES = positiveIntegerEnv(
+  'BENCHMARK_LARGE_PLAYLIST_ENTRIES',
+  400_000,
+);
+const LARGE_PLAYLIST_LIVE = positiveIntegerEnv(
+  'BENCHMARK_LARGE_PLAYLIST_LIVE',
+  50_000,
+);
+const LARGE_PLAYLIST = {
+  totalEntries: LARGE_PLAYLIST_ENTRIES,
+  liveEntries: LARGE_PLAYLIST_LIVE,
+  playlistBytes: positiveIntegerEnv(
+    'BENCHMARK_LARGE_PLAYLIST_BYTES',
+    128 * 1024 * 1024,
+  ),
+  sampleIntervalMs: positiveIntegerEnv('BENCHMARK_LARGE_PLAYLIST_SAMPLE_MS', 25),
+  chunkBytes: positiveIntegerEnv('BENCHMARK_LARGE_PLAYLIST_CHUNK_BYTES', 64 * 1024),
+  chunkDelayMs: nonNegativeIntegerEnv('BENCHMARK_LARGE_PLAYLIST_CHUNK_DELAY_MS', 0),
+  expectedChannels: positiveIntegerEnv(
+    'BENCHMARK_LARGE_PLAYLIST_EXPECTED_CHANNELS',
+    LARGE_PLAYLIST_LIVE,
+  ),
+  timeoutMs: positiveIntegerEnv('BENCHMARK_LARGE_PLAYLIST_TIMEOUT_MS', 600_000),
+  accountId: 'benchmark-large-playlist',
+};
+const LARGE_PLAYLIST_ONLY = process.env.BENCHMARK_LARGE_PLAYLIST_ONLY === '1';
 
-test('records 50,000-item application benchmarks', async ({ page, browserName }) => {
+test('records 50,000-item application benchmarks', async ({
+  browser,
+  page,
+  browserName,
+}) => {
   test.skip(browserName !== 'chromium', 'The benchmark uses Chromium heap metrics');
+  if (LARGE_PLAYLIST_ONLY) {
+    const result = await runDesktopLargePlaylistBenchmark(browser);
+    console.log(`Large playlist benchmark result: ${JSON.stringify(result)}`);
+    return;
+  }
   await page.route('**/benchmark-seed.html', (route) => route.fulfill({
     contentType: 'text/html',
     body: '<!doctype html><title>Benchmark seed</title>',
@@ -201,6 +237,7 @@ test('records 50,000-item application benchmarks', async ({ page, browserName })
     };
     assertColdLoadBenchmark(coldLoad, SCALE);
     suites.coldLoad = coldLoad;
+    const largePlaylist = await runDesktopLargePlaylistBenchmark(browser);
     const report = {
       version: 1,
       target: 'desktop-chromium',
@@ -222,6 +259,7 @@ test('records 50,000-item application benchmarks', async ({ page, browserName })
           usedHeapMiB: Math.round(heap.usedSize / 1_048_576 * 10) / 10,
           totalHeapMiB: Math.round(heap.totalSize / 1_048_576 * 10) / 10,
           retained,
+          largePlaylist,
         },
       },
     };
@@ -239,3 +277,41 @@ test('records 50,000-item application benchmarks', async ({ page, browserName })
     });
   }
 });
+
+async function runDesktopLargePlaylistBenchmark(browser: Browser) {
+  const context = await browser.newContext({
+    baseURL: 'http://localhost:3000',
+    viewport: { width: 1920, height: 1080 },
+  });
+  try {
+    const page = await context.newPage();
+    const browserCdp = await browser.newBrowserCDPSession();
+    const pageCdp = await context.newCDPSession(page);
+    return await measureLargePlaylistMemory(LARGE_PLAYLIST, {
+      page,
+      browserCdp,
+      pageCdp,
+      collectGarbage: () => pageCdp.send('HeapProfiler.collectGarbage'),
+      delay: (milliseconds: number) =>
+        new Promise<void>(resolve => setTimeout(resolve, milliseconds)),
+    });
+  } finally {
+    await context.close();
+  }
+}
+
+function positiveIntegerEnv(name: string, fallback: number): number {
+  const value = Number(process.env[name] ?? fallback);
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return value;
+}
+
+function nonNegativeIntegerEnv(name: string, fallback: number): number {
+  const value = Number(process.env[name] ?? fallback);
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error(`${name} must be a non-negative integer`);
+  }
+  return value;
+}

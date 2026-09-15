@@ -3,12 +3,16 @@ import type { NavDirection } from '../types';
 interface Candidate {
   el: HTMLElement;
   rect: DOMRect;
+  container: Element | null;
 }
 
 export class SpatialNav {
   private container: HTMLElement;
   private onFocusChange?: (el: HTMLElement | null) => void;
   private restrictRoot: HTMLElement | null = null;
+  private visibilityCache = new WeakMap<HTMLElement, boolean>();
+  private readonly visibilityObserver: MutationObserver;
+  private readonly stylesheetObserver: MutationObserver;
   // Per-container memory for `data-nav-enter="last-focused"`: re-entering a
   // container returns to where focus left it instead of the nearest edge item.
   private lastFocusedIn = new Map<HTMLElement, HTMLElement>();
@@ -17,6 +21,28 @@ export class SpatialNav {
   constructor(container: HTMLElement, onFocusChange?: (el: HTMLElement | null) => void) {
     this.container = container;
     this.onFocusChange = onFocusChange;
+    this.visibilityObserver = new MutationObserver((records) => {
+      if (records.some((record) => this.mutationAffectsVisibility(record))) {
+        this.visibilityCache = new WeakMap();
+      }
+    });
+    this.visibilityObserver.observe(container, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeOldValue: true,
+      attributeFilter: ['class', 'style', 'hidden', 'aria-hidden'],
+    });
+    this.stylesheetObserver = new MutationObserver(() => {
+      this.visibilityCache = new WeakMap();
+    });
+    this.stylesheetObserver.observe(document.head, {
+      subtree: true,
+      childList: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: ['media', 'disabled', 'href'],
+    });
     this.container.addEventListener('nav:hover', (e: Event) => {
       const target = e.target as HTMLElement;
       if (target.hasAttribute('data-focusable')) {
@@ -41,29 +67,142 @@ export class SpatialNav {
    */
   setRestrict(el: HTMLElement | null): void {
     this.restrictRoot = el;
+    this.visibilityCache = new WeakMap();
   }
 
-  // Navigable means measurable: an element hidden any way at all — `.hidden`,
-  // an inline or stylesheet `display: none`, a hidden ancestor, a collapsed box
-  // — reports a zero-sized rect. `visibility` is inherited, so reading it off
-  // the element covers ancestors too. jsdom has no layout, so a stylesheet-hidden
-  // element is pinned by e2e (`settings`/`movies`), not by unit tests.
   private getFocusables(): HTMLElement[] {
     return Array.from(this.root().querySelectorAll<HTMLElement>('[data-focusable]'));
   }
 
+  // Collapsed/display-none elements have no measurable box, while inherited
+  // visibility:hidden keeps its geometry and must be checked separately.
   private isNavigable(c: Candidate): boolean {
     if (c.rect.width <= 0 || c.rect.height <= 0) return false;
-    return getComputedStyle(c.el).visibility !== 'hidden';
+    const cached = this.visibilityCache.get(c.el);
+    if (cached !== undefined) return cached;
+    const visible = getComputedStyle(c.el).visibility !== 'hidden';
+    this.visibilityCache.set(c.el, visible);
+    return visible;
   }
 
-  private getCandidates(): Candidate[] {
-    const all = this.getFocusables().map((el) => ({ el, rect: el.getBoundingClientRect() }));
+  private getCandidates(
+    elements = this.getFocusables(),
+    fallback = true,
+    container?: HTMLElement,
+  ): Candidate[] {
+    const all: Candidate[] = [];
+    for (const el of elements) {
+      const candidateContainer = el.closest('[data-nav-container]');
+      if (container && candidateContainer !== container) continue;
+      all.push({
+        el,
+        rect: el.getBoundingClientRect(),
+        container: candidateContainer,
+      });
+    }
     const navigable = all.filter((c) => this.isNavigable(c));
     // Everything measuring zero means the subtree isn't laid out yet (a view
     // still hidden when focus is seeded). Fall back to the unfiltered list so
     // focus lands somewhere rather than nowhere.
-    return navigable.length ? navigable : all;
+    return navigable.length || !fallback ? navigable : all;
+  }
+
+  private mutationAffectsVisibility(record: MutationRecord): boolean {
+    if (record.type === 'childList') return true;
+    if (record.attributeName === 'class') {
+      const target = record.target as Element;
+      return this.visibilityClasses(record.oldValue)
+        !== this.visibilityClasses(target.getAttribute('class'));
+    }
+    if (record.attributeName === 'style') {
+      const target = record.target as Element;
+      return this.inlineVisibility(record.oldValue)
+        !== this.inlineVisibility(target.getAttribute('style'));
+    }
+    return true;
+  }
+
+  private visibilityClasses(value: string | null): string {
+    return (value ?? '').split(/\s+/)
+      .filter((name) => name && name !== 'focused')
+      .sort()
+      .join(' ');
+  }
+
+  private inlineVisibility(value: string | null): string {
+    const display = /(?:^|;)\s*display\s*:\s*([^;]+)/i.exec(value ?? '');
+    const visibility = /(?:^|;)\s*visibility\s*:\s*([^;]+)/i.exec(value ?? '');
+    return `${display?.[1].trim().toLowerCase() ?? ''}|${
+      visibility?.[1].trim().toLowerCase() ?? ''
+    }`;
+  }
+
+  private findBest(
+    candidates: Candidate[],
+    current: Candidate,
+    direction: NavDirection,
+  ): { candidate: Candidate | null; score: number } {
+    const rect = current.rect;
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const currentContainer = current.container;
+    let best: Candidate | null = null;
+    let bestScore = Infinity;
+
+    for (const candidate of candidates) {
+      if (candidate.el === current.el) continue;
+
+      const r = candidate.rect;
+      const ix = r.left + r.width / 2;
+      const iy = r.top + r.height / 2;
+      const dx = ix - cx;
+      const dy = iy - cy;
+
+      // Off-axis distance measured as the gap between the rects (0 when they
+      // overlap on that axis), not centre-to-centre — so a vertical move can
+      // reach a wide or right-aligned item that shares the travel column,
+      // rather than always favouring a narrow left-aligned one.
+      const gapX = Math.max(r.left - rect.right, rect.left - r.right, 0);
+      const gapY = Math.max(r.top - rect.bottom, rect.top - r.bottom, 0);
+
+      let valid = false;
+      let primary = 0;
+      let secondary = 0;
+
+      switch (direction) {
+        case 'up':
+          valid = dy < -5;
+          primary = Math.abs(dy);
+          secondary = gapX;
+          break;
+        case 'down':
+          valid = dy > 5;
+          primary = Math.abs(dy);
+          secondary = gapX;
+          break;
+        case 'left':
+          valid = dx < -5;
+          primary = Math.abs(dx);
+          secondary = gapY;
+          break;
+        case 'right':
+          valid = dx > 5;
+          primary = Math.abs(dx);
+          secondary = gapY;
+          break;
+      }
+
+      if (!valid) continue;
+
+      const sameContainer = candidate.container === currentContainer;
+      const score = primary + secondary * 3 + (sameContainer ? 0 : 5000);
+
+      if (score < bestScore) {
+        bestScore = score;
+        best = candidate;
+      }
+    }
+    return { candidate: best, score: bestScore };
   }
 
   focus(el: HTMLElement | null): void {
@@ -128,6 +267,26 @@ export class SpatialNav {
   }
 
   move(direction: NavDirection): boolean {
+    const root = this.root();
+    const focusedContainer = this.focused?.closest<HTMLElement>('[data-nav-container]');
+    if (this.focused && root.contains(this.focused) && focusedContainer
+        && root.contains(focusedContainer)) {
+      const sameElements = Array.from(
+        focusedContainer.querySelectorAll<HTMLElement>('[data-focusable]'),
+      );
+      const sameCandidates = this.getCandidates(sameElements, false, focusedContainer);
+      const current = sameCandidates.find((c) => c.el === this.focused);
+      if (current) {
+        const same = this.findBest(sameCandidates, current, direction);
+        // A cross-container candidate always pays at least 5000, so a nearer
+        // same-container result cannot be displaced by the full-view scan.
+        if (same.candidate && same.score <= 5000) {
+          this.focus(same.candidate.el);
+          return true;
+        }
+      }
+    }
+
     const candidates = this.getCandidates();
     if (!candidates.length) return false;
 
@@ -138,69 +297,7 @@ export class SpatialNav {
     }
     this.focused.classList.add('focused');
 
-    const rect = current.rect;
-    const cx = rect.left + rect.width / 2;
-    const cy = rect.top + rect.height / 2;
-
-    let best: Candidate | null = null;
-    let bestScore = Infinity;
-
-    for (const candidate of candidates) {
-      if (candidate.el === this.focused) continue;
-
-      const r = candidate.rect;
-      const ix = r.left + r.width / 2;
-      const iy = r.top + r.height / 2;
-
-      const dx = ix - cx;
-      const dy = iy - cy;
-
-      // Off-axis distance measured as the gap between the rects (0 when they
-      // overlap on that axis), not centre-to-centre — so a vertical move can
-      // reach a wide or right-aligned item that shares the travel column,
-      // rather than always favouring a narrow left-aligned one.
-      const gapX = Math.max(r.left - rect.right, rect.left - r.right, 0);
-      const gapY = Math.max(r.top - rect.bottom, rect.top - r.bottom, 0);
-
-      let valid = false;
-      let primary = 0;
-      let secondary = 0;
-
-      switch (direction) {
-        case 'up':
-          valid = dy < -5;
-          primary = Math.abs(dy);
-          secondary = gapX;
-          break;
-        case 'down':
-          valid = dy > 5;
-          primary = Math.abs(dy);
-          secondary = gapX;
-          break;
-        case 'left':
-          valid = dx < -5;
-          primary = Math.abs(dx);
-          secondary = gapY;
-          break;
-        case 'right':
-          valid = dx > 5;
-          primary = Math.abs(dx);
-          secondary = gapY;
-          break;
-      }
-
-      if (!valid) continue;
-
-      const sameContainer =
-        candidate.el.closest('[data-nav-container]') === this.focused.closest('[data-nav-container]');
-
-      const score = primary + secondary * 3 + (sameContainer ? 0 : 5000);
-
-      if (score < bestScore) {
-        bestScore = score;
-        best = candidate;
-      }
-    }
+    const best = this.findBest(candidates, current, direction).candidate;
 
     if (best) {
       this.focus(this.enterTarget(best, candidates));

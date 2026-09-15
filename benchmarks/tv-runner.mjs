@@ -24,6 +24,11 @@ import {
   installUniqueGroupFixture,
   installM3USearchFixture,
   measureHostedXMLTVPipelineComparison,
+  startLargePlaylistBenchmarkServer,
+  installLargePlaylistSource,
+  waitForLargePlaylistChannelCount,
+  readLargePlaylistChannelCount,
+  startTvRendererRssSampler,
   runM3USearchBenchmark,
   assertM3USearchBenchmark,
   assertPointerBenchmark,
@@ -49,6 +54,19 @@ const COLD_PLAYLIST_URL = 'http://host/cold-list.m3u';
 const SCALE = Number(process.env.BENCHMARK_SCALE ?? '50000');
 const KEY_SAMPLES = Number(process.env.BENCHMARK_KEY_SAMPLES ?? '30');
 const QUERY_SAMPLES = Number(process.env.BENCHMARK_QUERY_SAMPLES ?? '5');
+const LARGE_PLAYLIST = {
+  totalEntries: Number(process.env.BENCHMARK_LARGE_PLAYLIST_ENTRIES ?? '400000'),
+  liveEntries: Number(process.env.BENCHMARK_LARGE_PLAYLIST_LIVE ?? '50000'),
+  playlistBytes: Number(
+    process.env.BENCHMARK_LARGE_PLAYLIST_BYTES ?? String(128 * 1024 * 1024),
+  ),
+  sampleIntervalMs: Number(process.env.BENCHMARK_LARGE_PLAYLIST_SAMPLE_MS ?? '100'),
+  chunkBytes: Number(process.env.BENCHMARK_LARGE_PLAYLIST_CHUNK_BYTES ?? String(64 * 1024)),
+  chunkDelayMs: Number(process.env.BENCHMARK_LARGE_PLAYLIST_CHUNK_DELAY_MS ?? '0'),
+  expectedChannels: Number(process.env.BENCHMARK_LARGE_PLAYLIST_EXPECTED_CHANNELS ?? '50000'),
+  timeoutMs: Number(process.env.BENCHMARK_LARGE_PLAYLIST_TIMEOUT_MS ?? '600000'),
+  accountId: 'benchmark-large-playlist',
+};
 const PORT = Number(process.env.TV_CDP_PORT ?? '9998');
 const cleanupOnly = process.argv.includes('--cleanup');
 
@@ -56,11 +74,22 @@ for (const [name, value] of [
   ['BENCHMARK_SCALE', SCALE],
   ['BENCHMARK_KEY_SAMPLES', KEY_SAMPLES],
   ['BENCHMARK_QUERY_SAMPLES', QUERY_SAMPLES],
+  ['BENCHMARK_LARGE_PLAYLIST_ENTRIES', LARGE_PLAYLIST.totalEntries],
+  ['BENCHMARK_LARGE_PLAYLIST_LIVE', LARGE_PLAYLIST.liveEntries],
+  ['BENCHMARK_LARGE_PLAYLIST_BYTES', LARGE_PLAYLIST.playlistBytes],
+  ['BENCHMARK_LARGE_PLAYLIST_SAMPLE_MS', LARGE_PLAYLIST.sampleIntervalMs],
+  ['BENCHMARK_LARGE_PLAYLIST_CHUNK_BYTES', LARGE_PLAYLIST.chunkBytes],
+  ['BENCHMARK_LARGE_PLAYLIST_EXPECTED_CHANNELS', LARGE_PLAYLIST.expectedChannels],
+  ['BENCHMARK_LARGE_PLAYLIST_TIMEOUT_MS', LARGE_PLAYLIST.timeoutMs],
   ['TV_CDP_PORT', PORT],
 ]) {
   if (!Number.isInteger(value) || value <= 0) {
     throw new Error(`${name} must be a positive integer`);
   }
+}
+if (!Number.isInteger(LARGE_PLAYLIST.chunkDelayMs)
+    || LARGE_PLAYLIST.chunkDelayMs < 0) {
+  throw new Error('BENCHMARK_LARGE_PLAYLIST_CHUNK_DELAY_MS must be a non-negative integer');
 }
 
 async function connect() {
@@ -319,6 +348,119 @@ async function verifyInstalledBuild(client) {
   };
 }
 
+async function runLargePlaylistMemory(client) {
+  const server = await startLargePlaylistBenchmarkServer({
+    ...LARGE_PLAYLIST,
+    deviceIp: resolveConfiguredDeviceIp(),
+  });
+  try {
+    await evaluate(client, installLargePlaylistSource, {
+      id: 'benchmark-control',
+      name: 'Control',
+      url: `${server.origin}/tiny.m3u`,
+      source: 'url',
+    });
+    await reloadApp(client);
+    await evaluate(client, waitForLargePlaylistChannelCount, {
+      expected: 1,
+      timeoutMs: LARGE_PLAYLIST.timeoutMs,
+    });
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    await client.call('HeapProfiler.collectGarbage');
+    const baselineHeap = await client.call('Runtime.getHeapUsage');
+    const baselineMemory = readRendererMemory();
+
+    await evaluate(client, installLargePlaylistSource, {
+      id: LARGE_PLAYLIST.accountId,
+      name: 'Large Playlist',
+      url: server.origin,
+      source: 'xtream',
+      xtream: {
+        username: 'u',
+        password: 'p',
+        liveOutput: 'ts',
+      },
+    });
+
+    const heapSamples = [baselineHeap.usedSize];
+    let sampling = true;
+    const heapSampler = (async () => {
+      while (sampling) {
+        await new Promise(resolve => setTimeout(
+          resolve,
+          LARGE_PLAYLIST.sampleIntervalMs,
+        ));
+        const sample = await client.call('Runtime.getHeapUsage').catch(() => null);
+        if (sample) heapSamples.push(sample.usedSize);
+      }
+    })();
+    const stopRssSampler = await startTvRendererRssSampler(
+      APP_ID,
+      LARGE_PLAYLIST.sampleIntervalMs,
+    );
+    let readyMs;
+    let processMemory;
+    try {
+      const started = performance.now();
+      await waitForLoad(client, () => client.call('Page.reload', { ignoreCache: true }));
+      await evaluate(
+        client,
+        waitForLargePlaylistChannelCount,
+        {
+          expected: LARGE_PLAYLIST.expectedChannels,
+          timeoutMs: LARGE_PLAYLIST.timeoutMs,
+        },
+      );
+      readyMs = performance.now() - started;
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      await client.call('HeapProfiler.collectGarbage');
+      heapSamples.push((await client.call('Runtime.getHeapUsage')).usedSize);
+    } finally {
+      sampling = false;
+      await heapSampler;
+      processMemory = await stopRssSampler();
+    }
+
+    const retainedMemory = readRendererMemory();
+    const retainedHeap = heapSamples[heapSamples.length - 1];
+    const peakHeap = Math.max(...heapSamples);
+    const mib = bytes => Math.round(bytes / 1_048_576 * 100) / 100;
+    return {
+      totalEntries: LARGE_PLAYLIST.totalEntries,
+      liveEntries: LARGE_PLAYLIST.liveEntries,
+      playlistBytes: LARGE_PLAYLIST.playlistBytes,
+      playlistMiB: mib(LARGE_PLAYLIST.playlistBytes),
+      catalogBytes: server.stats.catalogBytes,
+      catalogMiB: mib(server.stats.catalogBytes),
+      chunkBytes: LARGE_PLAYLIST.chunkBytes,
+      chunkDelayMs: LARGE_PLAYLIST.chunkDelayMs,
+      playlistDurationMs: Math.round(server.stats.playlistDurationMs * 100) / 100,
+      readyMs: Math.round(readyMs * 100) / 100,
+      channels: await evaluate(client, readLargePlaylistChannelCount),
+      samples: heapSamples.length,
+      baselineRendererProcesses: 1,
+      peakRendererProcesses: 1,
+      baselineRssMiB: processMemory?.startRssMiB ?? baselineMemory.rssMiB,
+      peakRssMiB: processMemory?.peakRssMiB ?? retainedMemory.highWaterMiB,
+      peakRssDeltaMiB: processMemory?.peakRssDeltaMiB ?? null,
+      retainedRssMiB: retainedMemory.rssMiB,
+      retainedRssDeltaMiB: baselineMemory.rssMiB === null
+        || retainedMemory.rssMiB === null
+        ? null
+        : Math.round((retainedMemory.rssMiB - baselineMemory.rssMiB) * 100) / 100,
+      baselineHeapMiB: mib(baselineHeap.usedSize),
+      peakHeapMiB: mib(peakHeap),
+      peakHeapDeltaMiB: mib(peakHeap - baselineHeap.usedSize),
+      retainedHeapMiB: mib(retainedHeap),
+      retainedHeapDeltaMiB: mib(retainedHeap - baselineHeap.usedSize),
+      rendererHighWaterMiB: processMemory?.rendererHighWaterMiB
+        ?? retainedMemory.highWaterMiB,
+    };
+  } finally {
+    await server.close();
+  }
+}
+
 async function runTvBenchmark() {
   let client = await connect();
   if (cleanupOnly) {
@@ -421,6 +563,7 @@ async function runTvBenchmark() {
     const coldLoad = await runColdLoad(client);
     assertColdLoadBenchmark(coldLoad, SCALE);
     suites.coldLoad = coldLoad;
+    const largePlaylist = await runLargePlaylistMemory(client);
     const device = await readDevice(client);
     const report = {
       version: 1,
@@ -447,6 +590,7 @@ async function runTvBenchmark() {
           totalHeapMiB: Math.round(heap.totalSize / 1_048_576 * 10) / 10,
           retained,
           ...readRendererMemory(),
+          largePlaylist,
         },
       },
     };
@@ -468,7 +612,7 @@ async function runTvBenchmark() {
           });
           const tx = db.transaction('playlist-cache', 'readonly');
           const cached = await new Promise((resolve, reject) => {
-            const request = tx.objectStore('playlist-cache').get('combined');
+            const request = tx.objectStore('playlist-cache').get('combined-v3');
             request.onsuccess = () => resolve(request.result);
             request.onerror = () => reject(request.error);
           });

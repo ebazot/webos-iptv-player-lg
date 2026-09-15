@@ -456,6 +456,67 @@ describe('EpgService multi-source matching', () => {
 });
 
 describe('EpgService cache and refresh', () => {
+  it('restores cached data without starting a network refresh', async () => {
+    vi.mocked(getCachedEpg).mockResolvedValue({
+      url: 'http://a',
+      timestamp: NOON,
+      data: parsed('a', 'Alpha', 'Cached'),
+    });
+
+    await EpgService.restoreCached([source('http://a', ['a'])]);
+
+    expect(fetchMaybeGzipText).not.toHaveBeenCalled();
+    const id = EpgService.findChannelId(
+      channel({ id: 'a', name: 'Alpha', playlistIds: ['a'] }),
+    );
+    expect(EpgService.getNowPlaying(id!)?.title).toBe('Cached');
+  });
+
+  it('queues refresh behind cache restoration', async () => {
+    let resolveCache: (value: Awaited<ReturnType<typeof getCachedEpg>>) => void =
+      () => undefined;
+    vi.mocked(getCachedEpg).mockImplementationOnce(() =>
+      new Promise(resolve => { resolveCache = resolve; }));
+
+    const restoring = EpgService.restoreCached([source('http://a', ['a'])]);
+    await Promise.resolve();
+    const refreshing = EpgService.refresh();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(fetchMaybeGzipText).not.toHaveBeenCalled();
+
+    resolveCache({
+      url: 'http://a',
+      timestamp: NOON,
+      data: parsed('a', 'Alpha', 'Cached'),
+    });
+    await restoring;
+    await refreshing;
+
+    expect(fetchMaybeGzipText).not.toHaveBeenCalled();
+  });
+
+  it('refreshes when a missing cache replaces fresh in-memory data', async () => {
+    vi.mocked(getCachedEpg).mockResolvedValueOnce({
+      url: 'http://a',
+      timestamp: NOON,
+      data: parsed('a', 'Alpha', 'Old'),
+    });
+    await EpgService.restoreCached([source('http://a', ['a'])]);
+
+    vi.mocked(getCachedEpg).mockResolvedValueOnce(null);
+    parseXMLTVMock.mockReturnValue(parsed('a', 'Alpha', 'Fresh'));
+    await EpgService.restoreCached([source('http://a', ['a'])]);
+    await EpgService.refresh();
+
+    expect(fetchMaybeGzipText).toHaveBeenCalledTimes(1);
+    const id = EpgService.findChannelId(
+      channel({ id: 'a', name: 'Alpha', playlistIds: ['a'] }),
+    );
+    expect(EpgService.getNowPlaying(id!)?.title).toBe('Fresh');
+  });
+
   it('loads every feed from its independent URL cache', async () => {
     vi.mocked(getCachedEpg).mockImplementation(async (url) => ({
       url,

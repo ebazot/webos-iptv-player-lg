@@ -30,6 +30,8 @@ interface SourceFilter {
   names: Set<string>;
 }
 
+type CacheRestoreResult = 'missing' | 'fresh' | 'stale';
+
 export interface EpgMappingCandidate {
   id: string;
   channelId: string;
@@ -100,6 +102,40 @@ class EpgServiceImpl {
     onDataPublished?: () => void,
   ): Promise<void> {
     return this.enqueue(() => this.runLoad(sources, channels, onDataPublished));
+  }
+
+  restoreCached(sources: EpgSource[], channels?: Channel[]): Promise<void> {
+    return this.enqueue(() => this.runRestoreCached(sources, channels));
+  }
+
+  private async runRestoreCached(
+    sources: EpgSource[],
+    channels?: Channel[],
+  ): Promise<void> {
+    this.playlistChannels = channels ?? null;
+    this.mappedChannelIds = this.collectMappedChannelIds();
+    this.setSources(sources);
+    this.appliedFilters = new Map(this.sources.map((source) =>
+      [source.url, this.filterFor(source)] as const));
+    const revision = ++this.revision;
+    const restored = await Promise.all(this.sources.map(async (source) => {
+      try {
+        return {
+          source,
+          result: await this.restoreCachedSource(source, revision),
+        };
+      } catch (err) {
+        log.warn('Cache read failed:', source.url, err);
+        return { source, result: 'missing' as const };
+      }
+    }));
+    if (revision !== this.revision) return;
+    for (const { source, result } of restored) {
+      if (result !== 'missing') continue;
+      this.states.delete(source.url);
+      this.channelIdsByName.delete(source.url);
+    }
+    this.publish(revision);
   }
 
   /**
@@ -414,49 +450,59 @@ class EpgServiceImpl {
     revision: number,
     onDataPublished?: () => void,
   ): Promise<void> {
-    if (revision !== this.revision) return;
+    let cached: CacheRestoreResult = 'missing';
+    try {
+      cached = await this.restoreCachedSource(source, revision);
+    } catch (err) {
+      log.warn('Cache read failed:', source.url, err);
+    }
+    if (cached === 'fresh') return;
+    if (cached === 'stale') this.publish(revision, onDataPublished);
+    const filter = this.filterFor(source);
+    await this.fetchSource(source, filter, revision, onDataPublished);
+  }
+
+  private async restoreCachedSource(
+    source: EpgSource,
+    revision: number,
+  ): Promise<CacheRestoreResult> {
+    if (revision !== this.revision) return 'missing';
     const filter = this.filterFor(source);
     if (filter && isEmptyFilter(filter)) {
       this.states.delete(source.url);
       this.channelIdsByName.delete(source.url);
-      return;
+      return 'missing';
     }
-    let cachedDataReady = false;
-    try {
-      const cached = await getCachedEpg(source.url);
-      if (revision !== this.revision) return;
-      if (cached) {
-        const age = Date.now() - cached.timestamp;
-        const hasTzField = 'tzOffsetMinutes' in cached.data;
-        const hasChannelCatalog = !cached.filter
-          || cached.data.channelCatalogComplete === true;
-        const covered = covers(cached.filter, filter);
-        const filtered = filterParsedEpg(cached.data, filter);
-        this.setState(source.url, {
-          data: filtered.data,
-          timestamp: cached.timestamp,
-          needsRefresh: !hasTzField || !hasChannelCatalog || !covered,
-        });
-        if (age < CONFIG.EPG_REFRESH_INTERVAL && hasTzField && hasChannelCatalog && covered) {
-          if (filtered.changed || !filtersEqual(cached.filter, filter)) {
-            await setCachedEpg(
-              source.url,
-              filtered.data,
-              serializeFilter(filter),
-              cached.timestamp,
-            );
-          }
-          log.info('Loaded cache:', source.url, '|', Object.keys(filtered.data.programmes).length,
-            'channels with programmes, age', Math.round(age / 60000), 'min');
-          return;
-        }
-        cachedDataReady = true;
-      }
-    } catch (err) {
-      log.warn('Cache read failed:', source.url, err);
+    const cached = await getCachedEpg(source.url);
+    if (revision !== this.revision || !cached) return 'missing';
+    const age = Date.now() - cached.timestamp;
+    const hasTzField = 'tzOffsetMinutes' in cached.data;
+    const hasChannelCatalog = !cached.filter
+      || cached.data.channelCatalogComplete === true;
+    const covered = covers(cached.filter, filter);
+    const filtered = filterParsedEpg(cached.data, filter);
+    this.setState(source.url, {
+      data: filtered.data,
+      timestamp: cached.timestamp,
+      needsRefresh: !hasTzField || !hasChannelCatalog || !covered,
+    });
+    const fresh = age < CONFIG.EPG_REFRESH_INTERVAL
+      && hasTzField
+      && hasChannelCatalog
+      && covered;
+    if (fresh && (filtered.changed || !filtersEqual(cached.filter, filter))) {
+      await setCachedEpg(
+        source.url,
+        filtered.data,
+        serializeFilter(filter),
+        cached.timestamp,
+      );
     }
-    if (cachedDataReady) this.publish(revision, onDataPublished);
-    await this.fetchSource(source, filter, revision, onDataPublished);
+    if (fresh) {
+      log.info('Loaded cache:', source.url, '|', Object.keys(filtered.data.programmes).length,
+        'channels with programmes, age', Math.round(age / 60000), 'min');
+    }
+    return fresh ? 'fresh' : 'stale';
   }
 
   private publish(revision: number, onPublished?: () => void): void {

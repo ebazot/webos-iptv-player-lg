@@ -48,6 +48,7 @@ export class ChannelListEditor {
   private groupPickerFor: string | null = null;
   private newGroupOpen = false;
   private epgPickerFor: string | null = null;
+  private epgPickerChannel: Channel | null = null;
   private epgOffsetFor: string | null = null;
   private epgQuery = '';
   private epgCandidates: EpgMappingCandidate[] = [];
@@ -255,6 +256,7 @@ export class ChannelListEditor {
     this.groupPickerFor = null;
     this.newGroupOpen = false;
     this.epgPickerFor = null;
+    this.epgPickerChannel = null;
     this.epgOffsetFor = null;
     this.epgQuery = '';
     this.epgCandidates = [];
@@ -290,6 +292,7 @@ export class ChannelListEditor {
     }
     if (this.epgPickerFor) {
       this.epgPickerFor = null;
+      this.epgPickerChannel = null;
       this.epgQuery = '';
       this.epgCandidates = [];
       this.releaseEpgSearch();
@@ -947,6 +950,7 @@ export class ChannelListEditor {
     const channel = PlaylistService.getByIndex(index);
     if (!channel) return;
     this.epgPickerFor = target.key;
+    this.epgPickerChannel = channel;
     this.epgQuery = channel.sourceName ?? channel.name;
     this.startEpgSearch(channel);
     this.epgFocusPosition = -1;
@@ -1048,6 +1052,7 @@ export class ChannelListEditor {
 
   private startEpgSearch(channel: Channel): void {
     const generation = ++this.epgSearchGeneration;
+    this.epgPickerChannel = channel;
     this.epgMappingEntries = EpgService.getMappingSearchEntries(channel);
     this.epgCandidates = [];
     this.epgSearchPending = true;
@@ -1059,9 +1064,7 @@ export class ChannelListEditor {
 
   private async updateEpgCandidates(generation: number): Promise<void> {
     const key = this.epgPickerFor;
-    const channel = key
-      ? PlaylistService.getByIndex(PlaylistService.indexOfKey(key))
-      : null;
+    const channel = this.epgPickerChannel;
     if (!key || !channel) return;
     const query = this.epgQuery;
     try {
@@ -1146,6 +1149,7 @@ export class ChannelListEditor {
     if (id === undefined || !key) return;
     ChannelCustomizationService.setEpgChannel(key, id);
     this.epgPickerFor = null;
+    this.epgPickerChannel = null;
     this.epgQuery = '';
     this.epgCandidates = [];
     this.releaseEpgSearch();
@@ -1161,7 +1165,7 @@ export class ChannelListEditor {
   private renderEpgPicker(): Safe | string {
     const key = this.epgPickerFor;
     if (!key) return '';
-    const channel = PlaylistService.getByIndex(PlaylistService.indexOfKey(key));
+    const channel = this.epgPickerChannel;
     if (!channel) return '';
     if (this.epgCandidateRevision !== EpgService.mappingRevision) {
       this.startEpgSearch(channel);

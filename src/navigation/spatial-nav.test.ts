@@ -186,12 +186,86 @@ describe('SpatialNav', () => {
     it('ignores elements hidden with visibility', () => {
       const cur = focusable({ x: 0, y: 0 });
       const invisible = focusable({ x: 0, y: 100 });
-      invisible.style.visibility = 'hidden';
+      invisible.classList.add('stylesheet-hidden');
+      const style = document.createElement('style');
+      style.textContent = '.stylesheet-hidden { visibility: hidden; }';
+      document.head.appendChild(style);
       const visible = focusable({ x: 0, y: 200 });
       const nav = new SpatialNav(makeContainer(cur, invisible, visible));
       nav.focus(cur);
       nav.move('down');
       expect(nav.focused).toBe(visible);
+      style.remove();
+    });
+
+    it('reuses computed visibility while only focus classes change', async () => {
+      const cur = focusable({ x: 0, y: 0 });
+      const next = focusable({ x: 0, y: 100 });
+      const nav = new SpatialNav(makeContainer(cur, next));
+      const computedStyle = vi.spyOn(window, 'getComputedStyle');
+
+      nav.focus(cur);
+      nav.move('down');
+      await Promise.resolve();
+      const calls = computedStyle.mock.calls.length;
+      nav.move('up');
+
+      expect(computedStyle).toHaveBeenCalledTimes(calls);
+      computedStyle.mockRestore();
+    });
+
+    it('invalidates cached visibility when a stylesheet changes', async () => {
+      const cur = focusable({ x: 0, y: 0 });
+      const hidden = focusable({ x: 0, y: 100 });
+      hidden.setAttribute('data-runtime-hidden', '');
+      const visible = focusable({ x: 0, y: 200 });
+      const nav = new SpatialNav(makeContainer(cur, hidden, visible));
+
+      nav.focus(cur);
+      nav.move('down');
+      nav.move('up');
+      const style = document.createElement('style');
+      style.textContent = '[data-runtime-hidden] { visibility: hidden; }';
+      document.head.appendChild(style);
+      await Promise.resolve();
+      nav.move('down');
+
+      expect(nav.focused).toBe(visible);
+      style.remove();
+    });
+
+    it('does not measure unrelated containers for a nearby move', () => {
+      const left = document.createElement('div');
+      left.setAttribute('data-nav-container', '');
+      const cur = focusable({ x: 0, y: 0 });
+      const next = focusable({ x: 0, y: 100 });
+      left.append(cur, next);
+      const right = document.createElement('div');
+      right.setAttribute('data-nav-container', '');
+      const unrelated = focusable({ x: 200, y: 0 });
+      const unrelatedRect = vi.spyOn(unrelated, 'getBoundingClientRect');
+      right.appendChild(unrelated);
+      const nav = new SpatialNav(makeContainer(left, right));
+      nav.focus(cur);
+      nav.move('down');
+      expect(nav.focused).toBe(next);
+      expect(unrelatedRect).not.toHaveBeenCalled();
+    });
+
+    it('scans other containers when their penalty can be beaten', () => {
+      const left = document.createElement('div');
+      left.setAttribute('data-nav-container', '');
+      const cur = focusable({ x: 0, y: 0 });
+      const far = focusable({ x: 0, y: 6000 });
+      left.append(cur, far);
+      const right = document.createElement('div');
+      right.setAttribute('data-nav-container', '');
+      const across = focusable({ x: 200, y: 100 });
+      right.appendChild(across);
+      const nav = new SpatialNav(makeContainer(left, right));
+      nav.focus(cur);
+      nav.move('down');
+      expect(nav.focused).toBe(across);
     });
 
     // focusFirst takes DOM order, not geometry, so a hidden leading element is

@@ -647,15 +647,19 @@ export class ChannelList {
       const next = parseInt(rawGroupPosition, 10) + delta;
       const groups = this.getGroupEntries();
       if (next < 0 || next >= groups.length) return false;
+      const selector = `[data-group-position="${String(next)}"]`;
+      const renderedTarget = this.container.querySelector<HTMLElement>(selector);
+      if (renderedTarget && this.groupScrollFrame === null) {
+        this.nav.focus(renderedTarget);
+        return true;
+      }
       const list = this.container.querySelector<HTMLElement>('.group-list');
       this.groupVirtualizer.ensureVisible(
         next,
         list?.clientHeight || CHANNEL_VIEWPORT_FALLBACK,
       );
       this.render(false);
-      const target = this.container.querySelector<HTMLElement>(
-        `[data-group-position="${String(next)}"]`,
-      );
+      const target = this.container.querySelector<HTMLElement>(selector);
       if (target) this.nav.focus(target);
       return true;
     }
@@ -669,10 +673,16 @@ export class ChannelList {
     );
     const next = position + delta;
     if (next < 0 || next >= count) return false;
+    const selector = `[data-list-position="${String(next)}"]`;
+    const renderedTarget = this.container.querySelector<HTMLElement>(selector);
+    if (renderedTarget && this.scrollFrame === null) {
+      this.nav.focus(renderedTarget);
+      return true;
+    }
     const main = this.container.querySelector<HTMLElement>('.channel-main');
     this.channelVirtualizer.ensureVisible(next, main?.clientHeight || CHANNEL_VIEWPORT_FALLBACK);
     this.render(false);
-    const target = this.container.querySelector<HTMLElement>(`[data-list-position="${next}"]`);
+    const target = this.container.querySelector<HTMLElement>(selector);
     if (target) this.nav.focus(target);
     return true;
   }

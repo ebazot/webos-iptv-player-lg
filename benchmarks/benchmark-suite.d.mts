@@ -1,3 +1,5 @@
+import type { CDPSession, Page } from '@playwright/test';
+
 export interface BenchmarkFixtureOptions {
   scale: number;
   accountId: string;
@@ -166,6 +168,91 @@ export function measureHostedXMLTVPipelineComparison(
   buffered: XMLTVPipelineBenchmark;
   streaming: XMLTVPipelineBenchmark;
 }>;
+
+export function startTvRendererRssSampler(
+  appId: string,
+  intervalMs?: number,
+): Promise<() => Promise<{
+  rssSamples: number;
+  startRssMiB: number;
+  peakRssMiB: number;
+  averageRssMiB: number;
+  peakRssDeltaMiB: number;
+  rendererHighWaterMiB: number;
+} | null>>;
+
+export interface LargePlaylistBenchmarkOptions {
+  totalEntries: number;
+  liveEntries: number;
+  playlistBytes: number;
+  sampleIntervalMs: number;
+  chunkBytes: number;
+  chunkDelayMs: number;
+  accountId: string;
+  expectedChannels?: number;
+  timeoutMs: number;
+  deviceIp?: string;
+}
+
+export interface LargePlaylistBenchmarkIo {
+  page: Page;
+  browserCdp: CDPSession;
+  pageCdp: CDPSession;
+  collectGarbage: () => Promise<unknown>;
+  delay: (milliseconds: number) => Promise<void>;
+}
+
+export interface LargePlaylistMemoryBenchmark {
+  totalEntries: number;
+  liveEntries: number;
+  playlistBytes: number;
+  playlistMiB: number;
+  catalogBytes: number;
+  catalogMiB: number;
+  chunkBytes: number;
+  chunkDelayMs: number;
+  playlistDurationMs: number;
+  readyMs: number;
+  channels: number;
+  samples: number;
+  baselineRendererProcesses: number;
+  peakRendererProcesses: number;
+  baselineRssMiB: number;
+  peakRssMiB: number;
+  peakRssDeltaMiB: number;
+  retainedRssMiB: number;
+  retainedRssDeltaMiB: number;
+  baselineHeapMiB: number;
+  peakHeapMiB: number;
+  peakHeapDeltaMiB: number;
+  retainedHeapMiB: number;
+  retainedHeapDeltaMiB: number;
+}
+
+export function measureLargePlaylistMemory(
+  options: LargePlaylistBenchmarkOptions,
+  io: LargePlaylistBenchmarkIo,
+): Promise<LargePlaylistMemoryBenchmark>;
+
+export function startLargePlaylistBenchmarkServer(
+  options: LargePlaylistBenchmarkOptions,
+): Promise<{
+  origin: string;
+  stats: {
+    catalogBytes: number;
+    playlistDurationMs: number;
+  };
+  close: () => Promise<void>;
+}>;
+
+export function installLargePlaylistSource(playlist: unknown): void;
+
+export function waitForLargePlaylistChannelCount(options: {
+  expected: number;
+  timeoutMs: number;
+}): Promise<void>;
+
+export function readLargePlaylistChannelCount(): number;
 
 export function releaseXMLTVPipelineBenchmark(): void;
 

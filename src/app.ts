@@ -651,6 +651,10 @@ class App {
         log.warn('No EPG sources configured');
         EpgService.reset();
       }
+      const epgChannels = PlaylistService.getEpgEligibleChannels();
+      if (epgSources.length) {
+        await EpgService.restoreCached(epgSources, epgChannels);
+      }
 
       const hasXtream = StorageService.getPlaylists()
         .some((p) => p.source === 'xtream' && isSourceEnabled(p));
@@ -680,11 +684,7 @@ class App {
       }
 
       if (epgSources.length) {
-        EpgService.load(
-          epgSources,
-          PlaylistService.getEpgEligibleChannels(),
-          () => this.refreshEpgDependentViews(),
-        )
+        EpgService.refresh(() => this.refreshEpgDependentViews())
           .then(() => {
             this.refreshEpgDependentViews();
           })

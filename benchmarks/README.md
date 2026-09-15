@@ -16,7 +16,9 @@ npm run benchmark:update   # run and intentionally replace the baseline
 ```
 
 The default run uses four-times CPU throttling to make main-thread regressions
-more visible on a development computer. The values can be overridden:
+more visible on a development computer. The large-playlist memory phase runs
+without CPU throttling so its desktop and TV results remain comparable. The
+values can be overridden:
 
 ```bash
 BENCHMARK_SCALE=50000 \
@@ -32,6 +34,23 @@ metrics from failing on insignificant scheduler jitter. The larger of the
 percentage and absolute allowances is used.
 The comparator rejects mismatched scale, CPU rate, browser, schema version, or
 sample counts instead of comparing incompatible reports.
+
+The memory phase also streams a synthetic 400,000-entry Xtream playlist with
+50,000 Live streams and a 128 MiB `get.php` response. Override its scale for a
+quicker run:
+
+```bash
+BENCHMARK_LARGE_PLAYLIST_ENTRIES=10000 \
+BENCHMARK_LARGE_PLAYLIST_LIVE=1200 \
+BENCHMARK_LARGE_PLAYLIST_BYTES=4194304 \
+npm run benchmark
+```
+
+`BENCHMARK_LARGE_PLAYLIST_CHUNK_DELAY_MS` optionally paces each 64 KiB chunk.
+The desktop run uses a separate browser context; the TV runner serves the same
+fixture over LAN. `memory.largePlaylist.readyMs` is regression-gated, while its
+RSS and heap measurements remain informational because allocator and process
+lifetime effects vary between runs.
 
 ## What is measured
 
@@ -53,7 +72,7 @@ sample counts instead of comparing incompatible reports.
 | Interaction transitions | Rapid wheel-to-D-pad handoff, trusted Magic Remote-style pointer activation, connected focus, EPG channel/date changes, and non-empty virtual windows |
 | Frame/long tasks | Action-to-next-frame distributions, frames over 50ms, and Long Tasks observed during the suites |
 | Stress watchdog | Maximum event-loop heartbeat gap and explicit post-interaction document liveness |
-| Memory | Used/total V8 heap plus three post-GC reopen cycles to detect retained growth |
+| Memory | Used/total V8 heap, three post-GC reopen cycles, and baseline/peak/retained renderer RSS plus page heap while streaming the large Xtream playlist |
 
 The key distributions record both synchronous main-thread handler time and
 action-to-next-frame latency. Search-open remains a synchronous handler
@@ -142,14 +161,13 @@ app, injecting the shared functions via `Runtime.evaluate`, and writing the
 report.
 
 The desktop XMLTV pipeline uses Playwright's immediate route fulfillment to
-isolate CPU and memory cost. The TV run starts a temporary LAN HTTP server on
-the benchmark host and sends the same gzip guide in 16 KiB chunks with 1ms
-between chunks, measuring real `ReadableStream` delivery and download/parse
-overlap. The server closes automatically after both buffered and streaming
-passes. Timing also records the largest animation-frame gap. During the
-separate memory pass, one persistent SSH session samples renderer RSS every
-10ms; this avoids per-sample SSH connection overhead and reports RSS peak,
-average, and delta alongside the CDP heap metrics.
+isolate CPU and memory cost. The TV run starts temporary LAN HTTP servers for
+the XMLTV and large-playlist phases. XMLTV uses 16 KiB chunks with 1ms between
+chunks, measuring real `ReadableStream` delivery and download/parse overlap.
+The servers close automatically after their measurements. Timing also records
+the largest animation-frame gap. During memory passes, one persistent SSH
+session samples renderer RSS; this avoids per-sample SSH connection overhead
+and reports RSS peak, average, and delta alongside the CDP heap metrics.
 
 CDP page-heap readings do not include the worker's transient parse heap. The
 streaming report marks this explicitly and includes only the cloned result once
