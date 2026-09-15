@@ -21,8 +21,6 @@ export interface XtreamLiveUrlParts {
   output: XtreamLiveOutput;
 }
 
-export type XtreamVodStreamKind = 'movie' | 'series';
-
 export function normalizeXtreamLiveOutputPreference(
   value: unknown,
 ): XtreamLiveOutputPreference {
@@ -89,10 +87,24 @@ export function xtreamLiveUrl(c: XtreamCredentials, streamId: string, output: Xt
 }
 
 /** Recover an Xtream account only from unambiguous standard live URL shapes. */
-export function xtreamCredentialsFromLiveUrl(url: string): XtreamLiveUrlParts | null {
+export function xtreamCredentialsFromLiveUrl(
+  url: string,
+  baseUrl = '',
+): XtreamLiveUrlParts | null {
   try {
     const parsed = new URL(url);
-    const parts = parsed.pathname.split('/').filter(Boolean);
+    let pathname = parsed.pathname;
+    let credentialBase = parsed.origin;
+    if (baseUrl) {
+      const base = new URL(normalizeXtreamBaseUrl(baseUrl));
+      if (parsed.origin !== base.origin) return null;
+      const basePath = base.pathname.replace(/\/+$/, '');
+      if (basePath && pathname !== basePath
+          && !pathname.startsWith(basePath + '/')) return null;
+      pathname = pathname.slice(basePath.length);
+      credentialBase = `${base.origin}${basePath}`;
+    }
+    const parts = pathname.split('/').filter(Boolean);
     const prefixed = parts[0]?.toLowerCase() === 'live';
     if ((prefixed && parts.length !== 4) || (!prefixed && parts.length !== 3)) return null;
     const usernameIndex = prefixed ? 1 : 0;
@@ -101,7 +113,7 @@ export function xtreamCredentialsFromLiveUrl(url: string): XtreamLiveUrlParts | 
     if (!match || (!prefixed && match[2])) return null;
     return {
       credentials: {
-        baseUrl: parsed.origin,
+        baseUrl: credentialBase,
         username: decodeURIComponent(parts[usernameIndex]),
         password: decodeURIComponent(parts[usernameIndex + 1]),
       },
@@ -124,23 +136,6 @@ export function xtreamVodUrl(c: XtreamCredentials, streamId: string, ext: string
 export function xtreamEpisodeUrl(c: XtreamCredentials, episodeId: string, ext: string): string {
   const base = normalizeXtreamBaseUrl(c.baseUrl);
   return `${base}/series/${encodeURIComponent(c.username)}/${encodeURIComponent(c.password)}/${episodeId}.${ext}`;
-}
-
-export function xtreamVodStreamKind(url: string): XtreamVodStreamKind | null {
-  try {
-    const parsed = new URL(url);
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
-    const parts = parsed.pathname.split('/').filter(Boolean);
-    if (parts.length < 4) return null;
-    const kind = parts[parts.length - 4].toLowerCase();
-    if (kind !== 'movie' && kind !== 'series') return null;
-    const stream = parts[parts.length - 1];
-    if (!parts[parts.length - 3] || !parts[parts.length - 2]
-        || !/^[^/]+\.[^/.]+$/.test(stream)) return null;
-    return kind;
-  } catch {
-    return null;
-  }
 }
 
 /** Xtream archive URL template. Duration is in minutes; start is provider-local
@@ -184,26 +179,6 @@ export function xtreamCatchupSources(
     { kind: 'legacy-bare', url: legacy },
     { kind: `legacy-${last.kind}`, url: `${legacy}&extension=${last.extension}` },
   ];
-}
-
-/** Extract the stream id from standard Xtream live URL variants. */
-export function xtreamLiveStreamId(url: string, knownIds?: ReadonlySet<string>): string {
-  try {
-    const parsed = new URL(url);
-    const parts = parsed.pathname.split('/').filter(Boolean);
-    if (parts.includes('movie') || parts.includes('series')) return '';
-    if (parts.length >= 3) {
-      const match = parts[parts.length - 1].match(/^([^/.]+)(?:\.[^/]*)?$/);
-      if (match) return decodeURIComponent(match[1]);
-    }
-    const explicit = parsed.searchParams.get('stream_id') || parsed.searchParams.get('stream');
-    if (explicit) return explicit;
-    const generic = parsed.searchParams.get('id');
-    if (generic && knownIds?.has(generic)) return generic;
-    return '';
-  } catch {
-    return '';
-  }
 }
 
 const pad2 = (value: number): string => String(value).padStart(2, '0');

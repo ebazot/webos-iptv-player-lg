@@ -55,6 +55,11 @@ export interface XtreamLiveStream {
   archiveDurationDays: number;
 }
 
+export interface XtreamLiveCatalogResult {
+  available: boolean;
+  streams: XtreamLiveStream[];
+}
+
 export interface XtreamLiveCategory {
   id: string;
   name: string;
@@ -146,8 +151,8 @@ async function fetchJsonStrict(
   }
 }
 
-// Metadata calls remain tolerant because their callers already model unsupported
-// endpoints as null/empty. Cancellation still propagates to the request owner.
+// Tolerant metadata callers model unsupported endpoints as null/empty.
+// Cancellation still propagates to the request owner.
 async function fetchJson(
   url: string,
   timeout: number,
@@ -167,6 +172,22 @@ function asArray(v: unknown): Record<string, unknown>[] {
   return Array.isArray(v)
     ? v.filter((x): x is Record<string, unknown> => !!x && typeof x === 'object')
     : [];
+}
+
+function parseLiveStreams(value: unknown): XtreamLiveStream[] {
+  return asArray(value)
+    .map((stream) => ({
+      streamId: toStr(stream.stream_id),
+      name: toStr(stream.name),
+      icon: toStr(stream.stream_icon),
+      epgChannelId: toStr(stream.epg_channel_id),
+      categoryId: toStr(stream.category_id),
+      directSource: toStr(stream.direct_source),
+      archive: stream.tv_archive === 1 || stream.tv_archive === '1'
+        || stream.tv_archive === true,
+      archiveDurationDays: Math.max(0, toNumber(stream.tv_archive_duration)),
+    }))
+    .filter(stream => stream.streamId !== '');
 }
 
 // Sidecar subtitles from a VOD / episode info block. Only entries with an
@@ -227,24 +248,30 @@ export function createXtreamClient(creds: XtreamCredentials, accountId = '') {
     },
 
     async getLiveStreams(signal?: AbortSignal): Promise<XtreamLiveStream[]> {
-      const arr = asArray(await fetchJson(
+      return parseLiveStreams(await fetchJson(
         xtreamPlayerApi(creds, 'get_live_streams'),
         CATALOG_TIMEOUT,
         CONFIG.XTREAM.CATALOG_MAX_BYTES,
         signal,
       ));
-      return arr
-        .map((stream) => ({
-          streamId: toStr(stream.stream_id),
-          name: toStr(stream.name),
-          icon: toStr(stream.stream_icon),
-          epgChannelId: toStr(stream.epg_channel_id),
-          categoryId: toStr(stream.category_id),
-          directSource: toStr(stream.direct_source),
-          archive: stream.tv_archive === 1 || stream.tv_archive === '1' || stream.tv_archive === true,
-          archiveDurationDays: Math.max(0, toNumber(stream.tv_archive_duration)),
-        }))
-        .filter(stream => stream.streamId !== '');
+    },
+
+    async getLiveStreamsResult(signal?: AbortSignal): Promise<XtreamLiveCatalogResult> {
+      try {
+        const value = await fetchJsonStrict(
+          xtreamPlayerApi(creds, 'get_live_streams'),
+          CATALOG_TIMEOUT,
+          CONFIG.XTREAM.CATALOG_MAX_BYTES,
+          signal,
+        );
+        return {
+          available: Array.isArray(value),
+          streams: parseLiveStreams(value),
+        };
+      } catch (err) {
+        if (isXtreamRequestCancelled(err)) throw err;
+        return { available: false, streams: [] };
+      }
     },
 
     async getLiveCategories(signal?: AbortSignal): Promise<XtreamLiveCategory[]> {

@@ -1,5 +1,42 @@
-import type { ParsedEpg } from '../types';
+import type {
+  Channel,
+  EpgChannel,
+  ParsedEpg,
+  ParsedPlaylist,
+  Programme,
+} from '../types';
 import type { XMLTVParseStats } from '../parsers/xmltv-parser';
+import type { XtreamLiveReference } from '../utils/xtream-live-match';
+
+export interface M3UWorkerRequest {
+  url: string;
+  timeout: number;
+  xtreamLive?: XtreamLiveReference[];
+  xtreamBaseUrl?: string;
+}
+
+export interface M3UWorkerResponse {
+  data: ParsedPlaylist;
+  metrics: {
+    transport: 'stream' | 'array_buffer';
+    filter: 'none' | 'unavailable' | 'live_catalog';
+    inputBytes: number;
+    chunks: number;
+    channelsKept: number;
+    channelsDropped: number;
+    elapsedMs: number;
+  };
+}
+
+export type M3UWorkerChunk =
+  | { kind: 'channels'; channels: Channel[] }
+  | {
+      kind: 'progress';
+      inputBytes: number;
+      chunks: number;
+      channelsEmitted: number;
+      channelsDropped: number;
+    };
 
 export interface XMLTVWorkerRequest {
   url: string;
@@ -25,6 +62,18 @@ export interface XMLTVWorkerResponse {
     elapsedMs: number;
   };
 }
+
+export type XMLTVWorkerChunk =
+  | { kind: 'reset'; attempt: number }
+  | { kind: 'channels'; attempt: number; entries: Array<[string, EpgChannel]> }
+  | { kind: 'programmes'; attempt: number; entries: Array<[string, Programme[]]> }
+  | {
+      kind: 'progress';
+      attempt: number;
+      encoding: 'gzip' | 'plain';
+      inputBytes: number;
+      chunks: number;
+    };
 
 export interface SearchIndexRequest {
   sessionId: number;
@@ -98,9 +147,15 @@ export interface MappingSearchQueryRequest {
 }
 
 export interface AppWorkerTasks {
+  'm3u.load': {
+    request: M3UWorkerRequest;
+    response: M3UWorkerResponse;
+    chunk: M3UWorkerChunk;
+  };
   'xmltv.load': {
     request: XMLTVWorkerRequest;
     response: XMLTVWorkerResponse;
+    chunk: XMLTVWorkerChunk;
   };
   'search.index': {
     request: SearchIndexRequest;

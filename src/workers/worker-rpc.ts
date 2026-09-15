@@ -1,6 +1,7 @@
 export interface WorkerTask {
   request: unknown;
   response: unknown;
+  chunk?: unknown;
 }
 
 export type WorkerTaskMap<Tasks> = {
@@ -20,6 +21,12 @@ interface WorkerSuccess {
   result: unknown;
 }
 
+interface WorkerProgress {
+  kind: 'progress';
+  id: number;
+  chunk: unknown;
+}
+
 interface WorkerFailure {
   kind: 'failure';
   id: number;
@@ -31,7 +38,7 @@ interface WorkerFailure {
   };
 }
 
-type WorkerResponse = WorkerSuccess | WorkerFailure;
+type WorkerResponse = WorkerSuccess | WorkerProgress | WorkerFailure;
 
 interface WorkerLike {
   postMessage(message: unknown): void;
@@ -49,6 +56,7 @@ interface WorkerEndpoint {
 type PendingRequest = {
   resolve(value: unknown): void;
   reject(reason: Error): void;
+  onChunk?: (chunk: unknown) => void;
 };
 
 export type WorkerRpcFatalReason =
@@ -63,8 +71,11 @@ interface WorkerRpcClientOptions {
 export type WorkerTaskHandlers<Tasks extends WorkerTaskMap<Tasks>> = {
   [TaskName in keyof Tasks]: (
     payload: Tasks[TaskName]['request'],
+    emitChunk: (chunk: TaskChunk<Tasks[TaskName]>) => void,
   ) => Promise<Tasks[TaskName]['response']> | Tasks[TaskName]['response'];
 };
+
+type TaskChunk<Task> = Task extends { chunk: infer Chunk } ? Chunk : never;
 
 export class WorkerRpcClient<Tasks extends WorkerTaskMap<Tasks>> {
   private nextId = 1;
@@ -93,6 +104,7 @@ export class WorkerRpcClient<Tasks extends WorkerTaskMap<Tasks>> {
   request<TaskName extends keyof Tasks & string>(
     task: TaskName,
     payload: Tasks[TaskName]['request'],
+    onChunk?: (chunk: TaskChunk<Tasks[TaskName]>) => void,
   ): Promise<Tasks[TaskName]['response']> {
     if (this.closed) return Promise.reject(new Error('Worker RPC client is terminated'));
     const id = this.nextId++;
@@ -100,6 +112,7 @@ export class WorkerRpcClient<Tasks extends WorkerTaskMap<Tasks>> {
       this.pending.set(id, {
         resolve: value => resolve(value as Tasks[TaskName]['response']),
         reject,
+        onChunk: onChunk as ((chunk: unknown) => void) | undefined,
       });
       const message: WorkerRequest = { kind: 'request', id, task, payload };
       try {
@@ -128,6 +141,10 @@ export class WorkerRpcClient<Tasks extends WorkerTaskMap<Tasks>> {
     }
     const pending = this.pending.get(value.id);
     if (!pending) return;
+    if (value.kind === 'progress') {
+      pending.onChunk?.(value.chunk);
+      return;
+    }
     this.pending.delete(value.id);
     if (value.kind === 'success') {
       pending.resolve(value.result);
@@ -165,7 +182,7 @@ export function exposeWorkerTasks<Tasks extends WorkerTaskMap<Tasks>>(
     const request = event.data;
     if (!isWorkerRequest(request)) return;
     const handler = handlers[request.task as keyof Tasks] as
-      | ((payload: unknown) => unknown)
+      | ((payload: unknown, emitChunk: (chunk: unknown) => void) => unknown)
       | undefined;
     if (typeof handler !== 'function') {
       postFailure(endpoint, request.id, new Error(`Unknown worker task: ${request.task}`));
@@ -173,7 +190,14 @@ export function exposeWorkerTasks<Tasks extends WorkerTaskMap<Tasks>>(
     }
     let result: unknown;
     try {
-      result = handler(request.payload);
+      result = handler(request.payload, chunk => {
+        const response: WorkerProgress = {
+          kind: 'progress',
+          id: request.id,
+          chunk,
+        };
+        endpoint.postMessage(response);
+      });
     } catch (error) {
       postFailure(endpoint, request.id, asError(error));
       return;
@@ -222,6 +246,7 @@ function isWorkerResponse(value: unknown): value is WorkerResponse {
   if (!value || typeof value !== 'object') return false;
   const response = value as Partial<WorkerResponse>;
   if (typeof response.id !== 'number') return false;
+  if (response.kind === 'progress') return 'chunk' in response;
   if (response.kind === 'success') return true;
   if (response.kind !== 'failure' || !response.error
       || typeof response.error !== 'object') return false;

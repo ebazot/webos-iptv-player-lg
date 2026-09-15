@@ -6,15 +6,12 @@ import {
   type ParsedPlaylist,
   type PlaylistTab,
 } from '../types';
-import { parseM3U } from '../parsers/m3u-parser';
-import { fetchPlaylistText } from '../utils/fetch-helper';
+import { fetchAndParseM3U } from '../parsers/m3u-loader';
 import {
   xtreamPlaylistUrl,
   xtreamEpgUrl,
   xtreamCatchupSource,
   xtreamLiveUrl,
-  xtreamLiveStreamId,
-  xtreamVodStreamKind,
   resolveXtreamLiveOutput,
   type XtreamCredentials,
   type XtreamLiveOutput,
@@ -22,8 +19,8 @@ import {
 import {
   channelKey,
   legacyChannelKey,
-  stableStreamUrl,
 } from '../utils/channel';
+import { createXtreamLiveMatcher } from '../utils/xtream-live-match';
 import {
   prepareSearchItem,
   rankPreparedTopK,
@@ -146,9 +143,6 @@ class PlaylistServiceImpl {
   async load(): Promise<Channel[]> {
     const enabledSources = StorageService.getPlaylists().filter(isSourceEnabled);
     const enabledIds = new Set(enabledSources.map(source => source.id));
-    const xtreamIds = new Set(enabledSources
-      .filter(source => source.source === 'xtream')
-      .map(source => source.id));
     if (!enabledIds.size) {
       this.reset();
       this.logLoadCompleted('none', 0, 0);
@@ -157,15 +151,12 @@ class PlaylistServiceImpl {
     const cached = await getCachedPlaylist();
     if (cached) {
       const channelsNeedFiltering = cached.channels
-        .some(channel => channel.playlistIds.some(id =>
-          !enabledIds.has(id) || (xtreamIds.has(id) && xtreamVodStreamKind(channel.url) !== null)));
+        .some(channel => channel.playlistIds.some(id => !enabledIds.has(id)));
       this.allChannels = channelsNeedFiltering
         ? cached.channels
             .map(channel => ({
               ...channel,
-              playlistIds: channel.playlistIds.filter(id =>
-                enabledIds.has(id)
-                && !(xtreamIds.has(id) && xtreamVodStreamKind(channel.url) !== null)),
+              playlistIds: channel.playlistIds.filter(id => enabledIds.has(id)),
             }))
             .filter(channel => channel.playlistIds.length > 0)
         : cached.channels;
@@ -214,25 +205,57 @@ class PlaylistServiceImpl {
       epgSources.push({ url, playlistIds: [playlistId], kind });
     };
 
-    for (const pl of playlists) {
+    for (let playlistIndex = 0; playlistIndex < playlists.length; playlistIndex++) {
+      const pl = playlists[playlistIndex];
+      const load = playlistIndex + 1;
+      const source = pl.source === 'xtream' ? 'xtream' : 'm3u';
+      const sourceStarted = Date.now();
+      const sourceEpgStart = epgSources.length;
+      log.info(
+        'Playlist source load started',
+        'event=playlist.source.load.started',
+        `load=${String(load)}`,
+        `source=${source}`,
+      );
       // Tag channels by the playlist's stable id, not its name or position, so
       // two playlists sharing a name/URL stay distinct and deleting/reordering
       // one never re-points another's channels.
       const plKey = pl.id;
-      // Prefer get.php so provider EPG, catch-up, ordering, headers, and custom
-      // URLs survive the existing M3U pipeline; the Player API is only a fallback.
+      // Use the Player API catalog to identify Live entries, but keep get.php as
+      // the channel source so provider ordering, headers, URLs, and metadata survive.
       let fetchUrl = pl.url;
       let xtreamCredentials: XtreamCredentials | null = null;
       let xtreamOutput: XtreamLiveOutput = 'ts';
+      let xtreamStreams: XtreamLiveStream[] | undefined;
+      let xtreamCatalogAvailable = false;
       if (pl.source === 'xtream' && pl.xtream) {
         const credentials = { baseUrl: pl.url, ...pl.xtream };
         xtreamCredentials = credentials;
+        const client = createXtreamClient(credentials);
         let allowedOutputFormats: string[] = [];
         if (pl.xtream.liveOutput === 'auto') {
           allowedOutputFormats =
-            (await createXtreamClient(credentials).getAccountInfo())?.allowedOutputFormats ?? [];
+            (await client.getAccountInfo())?.allowedOutputFormats ?? [];
         }
         xtreamOutput = resolveXtreamLiveOutput(pl.xtream.liveOutput, allowedOutputFormats);
+        const catalogStarted = Date.now();
+        log.info(
+          'Xtream Live catalog load started',
+          'event=xtream.live_catalog.started',
+          `load=${String(load)}`,
+          'endpoint=get_live_streams',
+        );
+        const liveCatalog = await client.getLiveStreamsResult();
+        xtreamCatalogAvailable = liveCatalog.available;
+        xtreamStreams = liveCatalog.streams;
+        log[liveCatalog.available ? 'info' : 'warn'](
+          'Xtream Live catalog load completed',
+          'event=xtream.live_catalog.completed',
+          `load=${String(load)}`,
+          `available=${liveCatalog.available ? '1' : '0'}`,
+          `items=${String(liveCatalog.streams.length)}`,
+          `elapsedMs=${String(Date.now() - catalogStarted)}`,
+        );
         fetchUrl = xtreamPlaylistUrl(
           credentials,
           xtreamOutput,
@@ -243,19 +266,20 @@ class PlaylistServiceImpl {
         let parsed: ParsedPlaylist | null = null;
         let playlistError: unknown;
         try {
-          const text = await fetchPlaylistText(fetchUrl, 60000);
-          log.info('Fetched', pl.name || pl.url, '|', text.length, 'bytes');
-          parsed = parseM3U(text, fetchUrl);
-          if (xtreamCredentials) {
-            parsed.channels = parsed.channels
-              .filter(channel => xtreamVodStreamKind(channel.url) === null);
-          }
+          const loaded = await fetchAndParseM3U(
+            fetchUrl,
+            60000,
+            xtreamCatalogAvailable ? xtreamStreams : undefined,
+            xtreamCredentials?.baseUrl,
+          );
+          parsed = loaded.data;
         } catch (err) {
           playlistError = err;
           if (!xtreamCredentials) throw err;
           log.warn(
             'Xtream playlist failed; trying the Player API live catalog',
             'event=xtream.live_fallback.used',
+            `load=${String(load)}`,
             'reason=request_failed',
           );
         }
@@ -266,20 +290,22 @@ class PlaylistServiceImpl {
             log.warn(
               'Xtream playlist contained no channels; trying the Player API live catalog',
               'event=xtream.live_fallback.used',
+              `load=${String(load)}`,
               'reason=no_channels',
             );
           }
           const client = createXtreamClient(xtreamCredentials);
-          const [categories, streams] = await Promise.all([
-            client.getLiveCategories(),
-            client.getLiveStreams(),
-          ]);
+          const categories = await client.getLiveCategories();
+          const streams = xtreamCatalogAvailable
+            ? xtreamStreams ?? []
+            : await client.getLiveStreams();
           fallbackStreams = streams;
           log.info(
             'Xtream Player API live catalog completed',
             'event=xtream.live_api.completed',
-            `categories=${categories.length}`,
-            `streams=${streams.length}`,
+            `load=${String(load)}`,
+            `categories=${String(categories.length)}`,
+            `streams=${String(streams.length)}`,
           );
           if (streams.length) {
             parsed = xtreamLivePlaylist(
@@ -300,7 +326,7 @@ class PlaylistServiceImpl {
             xtreamCredentials,
             plKey,
             xtreamOutput,
-            fallbackStreams,
+            fallbackStreams ?? xtreamStreams,
           );
         }
         if (parsed.issues.length) {
@@ -345,12 +371,33 @@ class PlaylistServiceImpl {
           } catch (e) { log.warn('Could not parse EPG URL:', epg, e); }
           addEpgSource(epg, plKey, 'm3u');
         }
+        log.info(
+          'Playlist source load completed',
+          'event=playlist.source.load.completed',
+          `load=${String(load)}`,
+          `source=${source}`,
+          `channels=${String(parsed.channels.length)}`,
+          `added=${String(added)}`,
+          `duplicates=${String(dupes)}`,
+          `epg=${String(epgSources.length - sourceEpgStart)}`,
+          `elapsedMs=${String(Date.now() - sourceStarted)}`,
+        );
       } catch (err) {
         failedPlaylists++;
+        log.error(
+          'Playlist source load failed',
+          'event=playlist.source.load.failed',
+          `load=${String(load)}`,
+          `source=${source}`,
+          'reason=request_failed',
+          `elapsedMs=${String(Date.now() - sourceStarted)}`,
+          err,
+        );
         if (pl.source === 'xtream') {
           log.error(
             `Failed to load Xtream playlist '${pl.name || pl.url}'`,
             'event=xtream.playlist.load.failed',
+            `load=${String(load)}`,
             err,
           );
         } else {
@@ -362,8 +409,8 @@ class PlaylistServiceImpl {
 
     this.allChannels = allChannels;
     this.epgSources = epgSources;
-    // Cache the raw parse: customization is a view over it, so an edit re-sorts
-    // memory instead of forcing a re-fetch.
+    // Customization preserves source names/groups on each channel, so cached
+    // channels can be re-customized after an edit without another network load.
     if (!failedPlaylists) {
       scheduleCachedPlaylist(allChannels, epgSources);
     } else {
@@ -418,16 +465,13 @@ class PlaylistServiceImpl {
 
     const clock = await client.getServerClock();
     const knownIds = new Set(streams.map(stream => stream.streamId));
-    const streamByDirectSource = new Map(streams
-      .filter(stream => usableDirectSource(stream.directSource))
-      .map(stream => [stableStreamUrl(stream.directSource), stream]));
+    const matchLive = createXtreamLiveMatcher(streams, credentials.baseUrl);
     let enabled = 0;
     let unmatched = 0;
     for (const channel of channels) {
-      const extractedId = channel.catchupStreamId || xtreamLiveStreamId(channel.url, knownIds);
-      const streamId = (extractedId && knownIds.has(extractedId) ? extractedId : '')
-        || streamByDirectSource.get(stableStreamUrl(channel.url))?.streamId
-        || '';
+      const streamId = channel.catchupStreamId && knownIds.has(channel.catchupStreamId)
+        ? channel.catchupStreamId
+        : matchLive(channel.url);
       const stream = archived.get(streamId);
       if (!stream) {
         if (!streamId) unmatched++;

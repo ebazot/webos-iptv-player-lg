@@ -10,8 +10,6 @@ import {
   xtreamCatchupSource,
   xtreamCatchupSources,
   xtreamCredentialsFromLiveUrl,
-  xtreamLiveStreamId,
-  xtreamVodStreamKind,
   formatXtreamCatchupStart,
   normalizeXtreamLiveOutputPreference,
   resolveXtreamLiveOutput,
@@ -155,22 +153,6 @@ describe('xtreamEpisodeUrl', () => {
   });
 });
 
-describe('xtreamVodStreamKind', () => {
-  it('classifies exact movie and series pathname segments case-insensitively', () => {
-    expect(xtreamVodStreamKind('http://host/movie/u1/p1/10.mp4')).toBe('movie');
-    expect(xtreamVodStreamKind('https://host/base/SeRiEs/u1/p1/20.mkv')).toBe('series');
-  });
-
-  it('retains substring, malformed, relative, query-based, and proxy URLs', () => {
-    expect(xtreamVodStreamKind('http://host/movies/u1/p1/10.mp4')).toBeNull();
-    expect(xtreamVodStreamKind('http://host/series-live/u1/p1/20.ts')).toBeNull();
-    expect(xtreamVodStreamKind('not a url')).toBeNull();
-    expect(xtreamVodStreamKind('/movie/u1/p1/10.mp4')).toBeNull();
-    expect(xtreamVodStreamKind('http://host/play?path=/movie/u1/p1/10.mp4')).toBeNull();
-    expect(xtreamVodStreamKind('http://host/proxy/movie/u1/p1/10.mp4/extra')).toBeNull();
-  });
-});
-
 describe('Xtream catch-up URLs', () => {
   it('recovers credentials and output from standard live URLs', () => {
     expect(xtreamCredentialsFromLiveUrl('http://host:8080/live/u%201/p%2F1/42.m3u8'))
@@ -185,6 +167,21 @@ describe('Xtream catch-up URLs', () => {
       });
     expect(xtreamCredentialsFromLiveUrl('http://host/u1/p1/43'))
       .toMatchObject({ streamId: '43', output: 'ts' });
+  });
+
+  it('recovers a live URL relative to a path-prefixed portal base', () => {
+    expect(xtreamCredentialsFromLiveUrl(
+      'http://host:8080/panel/live/u1/p1/42.ts',
+      'http://host:8080/panel',
+    )).toEqual({
+      credentials: {
+        baseUrl: 'http://host:8080/panel',
+        username: 'u1',
+        password: 'p1',
+      },
+      streamId: '42',
+      output: 'ts',
+    });
   });
 
   it('does not infer credentials from unrelated or query-based URLs', () => {
@@ -256,18 +253,6 @@ describe('Xtream catch-up URLs', () => {
       '42',
       'm3u8',
     )).toBe('http://host/timeshift/u%201/p%2F1/{duration}/{start}/42.m3u8');
-  });
-
-  it('extracts ids from standard and query-based live URLs', () => {
-    expect(xtreamLiveStreamId('http://host/live/u1/p1/42.ts')).toBe('42');
-    expect(xtreamLiveStreamId('http://host/u1/p1/43.m3u8')).toBe('43');
-    expect(xtreamLiveStreamId('http://host/play?stream_id=44')).toBe('44');
-    expect(xtreamLiveStreamId('http://host/play?stream=45')).toBe('45');
-    expect(xtreamLiveStreamId('http://host/play?id=46', new Set(['46']))).toBe('46');
-    expect(xtreamLiveStreamId('http://host/play?id=46', new Set(['47']))).toBe('');
-    expect(xtreamLiveStreamId('http://host/live/u1/p1/47.ts?stream_id=99')).toBe('47');
-    expect(xtreamLiveStreamId('http://host/movie/u1/p1/42.mp4')).toBe('');
-    expect(xtreamLiveStreamId('not a url')).toBe('');
   });
 
   it('formats UTC catch-up time when no provider clock is available', () => {

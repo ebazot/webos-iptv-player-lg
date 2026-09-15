@@ -87,6 +87,38 @@ describe('fetchAndParseXMLTV', () => {
     expect(result.metrics.attempts).toBe(2);
   });
 
+  it('emits bounded programme batches and resets before an order retry', async () => {
+    const programmes = Array.from({ length: 257 }, (_, index) =>
+      `<programme channel="ch1" start="${start}" stop="${stop}">`
+      + `<title>P${String(index)}</title></programme>`)
+      .join('');
+    const xml = `<tv>${programmes}`
+      + '<channel id="ch1"><display-name>Alpha</display-name></channel></tv>';
+    vi.stubGlobal('fetch', vi.fn(async () => responseInChunks(strToU8(xml), 1024)));
+    const chunks: Parameters<NonNullable<Parameters<
+      typeof fetchAndParseXMLTVInWorker
+    >[1]>>[0][] = [];
+
+    const result = await fetchAndParseXMLTVInWorker({
+      url: 'http://host/a',
+      timeout: 1000,
+      options: {
+        nowMs: new Date('2026-08-14T19:30:00Z').getTime(),
+        channelNames: ['alpha'],
+      },
+    }, chunk => chunks.push(chunk));
+
+    expect(chunks.filter(chunk => chunk.kind === 'reset').map(chunk => chunk.attempt))
+      .toEqual([1, 2]);
+    const finalProgrammes = chunks
+      .filter(chunk => chunk.kind === 'programmes' && chunk.attempt === 2)
+      .flatMap(chunk => chunk.kind === 'programmes' ? chunk.entries : [])
+      .flatMap(([, entries]) => entries);
+    expect(finalProgrammes).toHaveLength(result.stats.programmesKept);
+    expect(result.data.programmes).toEqual({});
+    expect(result.metrics.attempts).toBe(2);
+  });
+
   it('uses the arrayBuffer fallback when streaming bodies are unavailable', async () => {
     const xml = '<tv><channel id="ch1"><display-name>Alpha</display-name></channel></tv>';
     const bytes = strToU8(xml);

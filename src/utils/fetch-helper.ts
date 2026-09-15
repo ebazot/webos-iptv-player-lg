@@ -51,21 +51,6 @@ export async function fetchText(url: string, timeout = 30000): Promise<string> {
   }
 }
 
-export async function fetchPlaylistText(url: string, timeout = 30000): Promise<string> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeout);
-
-  try {
-    const response = await fetch(url, { signal: controller.signal });
-    if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    const { decodePlaylistBytes } = await import('../parsers/m3u-parser');
-    return decodePlaylistBytes(bytes);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 const UTF8_BOM = [0xef, 0xbb, 0xbf];
 
 // Longest run of bytes that could still be leading BOM without being one yet.

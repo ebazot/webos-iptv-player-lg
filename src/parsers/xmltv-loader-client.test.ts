@@ -8,6 +8,7 @@ class FakeWorker {
   static terminations = 0;
   static instances: FakeWorker[] = [];
   static respond = true;
+  static chunks: unknown[] = [];
   private messageListener: ((event: MessageEvent<unknown>) => void) | null = null;
   private errorListener: ((event: ErrorEvent) => void) | null = null;
 
@@ -20,8 +21,13 @@ class FakeWorker {
     FakeWorker.request = message;
     if (!FakeWorker.respond) return;
     const id = (message as { id: number }).id;
-    queueMicrotask(() => this.messageListener?.({
-      data: {
+    queueMicrotask(() => {
+      for (const chunk of FakeWorker.chunks) {
+        this.messageListener?.({
+          data: { kind: 'progress', id, chunk },
+        } as MessageEvent<unknown>);
+      }
+      this.messageListener?.({ data: {
         kind: 'success',
         id,
         result: {
@@ -36,8 +42,8 @@ class FakeWorker {
             elapsedMs: 2,
           },
         },
-      },
-    } as MessageEvent<unknown>));
+      } } as MessageEvent<unknown>);
+    });
   }
 
   terminate(): void {
@@ -68,6 +74,7 @@ afterEach(() => {
   FakeWorker.terminations = 0;
   FakeWorker.instances = [];
   FakeWorker.respond = true;
+  FakeWorker.chunks = [];
   vi.useRealTimers();
 });
 
@@ -110,7 +117,7 @@ describe('fetchAndParseXMLTV worker client', () => {
       'chunks=1',
       'programmes=0',
       'dropped=0',
-      'elapsed=2ms',
+      'elapsedMs=2',
     );
   });
 
@@ -126,6 +133,64 @@ describe('fetchAndParseXMLTV worker client', () => {
     await vi.advanceTimersByTimeAsync(1000);
 
     expect(FakeWorker.terminations).toBe(1);
+  });
+
+  it('reconstructs and sorts batched XMLTV results after a reset', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.stubGlobal('document', { baseURI: 'http://host/app/index.html' });
+    vi.stubGlobal('Worker', FakeWorker);
+    const later = new Date('2026-08-14T20:00:00Z');
+    const earlier = new Date('2026-08-14T19:00:00Z');
+    FakeWorker.chunks = [
+      { kind: 'reset', attempt: 1 },
+      {
+        kind: 'programmes',
+        attempt: 1,
+        entries: [['old', [{
+          start: earlier,
+          stop: later,
+          title: 'Discarded',
+          description: '',
+          category: '',
+          icon: '',
+        }]]],
+      },
+      { kind: 'reset', attempt: 2 },
+      {
+        kind: 'channels',
+        attempt: 2,
+        entries: [['ch1', { name: 'Alpha', icon: '' }]],
+      },
+      {
+        kind: 'programmes',
+        attempt: 2,
+        entries: [['ch1', [
+          {
+            start: later,
+            stop: new Date('2026-08-14T21:00:00Z'),
+            title: 'Later',
+            description: '',
+            category: '',
+            icon: '',
+          },
+          {
+            start: earlier,
+            stop: later,
+            title: 'Earlier',
+            description: '',
+            category: '',
+            icon: '',
+          },
+        ]]],
+      },
+    ];
+
+    const result = await fetchAndParseXMLTV('http://host/a');
+
+    expect(result.data.channels).toEqual({ ch1: { name: 'Alpha', icon: '' } });
+    expect(result.data.programmes.ch1.map(programme => programme.title))
+      .toEqual(['Earlier', 'Later']);
+    expect(result.data.programmes.old).toBeUndefined();
   });
 
   it('keeps the shared worker alive while a client retains it', async () => {

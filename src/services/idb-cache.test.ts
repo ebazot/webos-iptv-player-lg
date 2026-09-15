@@ -2,8 +2,10 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 import type { Channel } from '../types';
+import { CONFIG } from '../config';
 import {
   clearAllCachedData,
+  clearCachedPlaylist,
   clearCachedStreamMimes,
   clearCachedChannelHealth,
   flushCacheWrites,
@@ -206,15 +208,28 @@ describe('idb-cache', () => {
     expect(localStorage.getItem('iptv_cached_playlist')).toBeNull();
   });
 
-  it('defers playlist persistence until after the next painted frame', async () => {
+  it('defers playlist persistence until after worker idle termination', async () => {
     const frames: FrameRequestCallback[] = [];
+    let delayedWrite: (() => void) | null = null;
     const originalRequest = globalThis.requestAnimationFrame;
     const originalCancel = globalThis.cancelAnimationFrame;
+    const originalSetTimeout = globalThis.setTimeout;
     globalThis.requestAnimationFrame = vi.fn((callback: FrameRequestCallback) => {
       frames.push(callback);
       return frames.length;
     });
     globalThis.cancelAnimationFrame = vi.fn();
+    const timer = vi.spyOn(globalThis, 'setTimeout').mockImplementation(
+      ((callback: TimerHandler, delay?: number, ...args: unknown[]) => {
+        if (delay === CONFIG.PLAYLIST_CACHE_WRITE_DELAY_MS) {
+          delayedWrite = () => {
+            if (typeof callback === 'function') callback(...args);
+          };
+          return 1;
+        }
+        return originalSetTimeout(callback, delay, ...args);
+      }) as typeof setTimeout,
+    );
     try {
       scheduleCachedPlaylist([channel('ch1')]);
       expect(await getCachedPlaylist()).toBeNull();
@@ -223,11 +238,19 @@ describe('idb-cache', () => {
       expect(await getCachedPlaylist()).toBeNull();
 
       frames.shift()?.(16);
+      expect(await getCachedPlaylist()).toBeNull();
+      expect(timer).toHaveBeenCalledWith(
+        expect.any(Function),
+        CONFIG.PLAYLIST_CACHE_WRITE_DELAY_MS,
+      );
+
+      delayedWrite?.();
       await flushCacheWrites();
       expect(await getCachedPlaylist()).not.toBeNull();
     } finally {
       globalThis.requestAnimationFrame = originalRequest;
       globalThis.cancelAnimationFrame = originalCancel;
+      timer.mockRestore();
     }
   });
 
@@ -244,18 +267,90 @@ describe('idb-cache', () => {
     expect(await getCachedPlaylist()).toBeNull();
   });
 
-  it('migrates a valid legacy playlist only after IndexedDB accepts it', async () => {
-    const channels = [channel('ch1')];
-    localStorage.setItem('iptv_cached_playlist', JSON.stringify({
-      version: 2,
-      channels,
-      epgSources: [],
-      timestamp: Date.now(),
-    }));
+  it('binds a delayed playlist write to the configuration that produced it', async () => {
+    const frames: FrameRequestCallback[] = [];
+    let delayedWrite: (() => void) | null = null;
+    const originalRequest = globalThis.requestAnimationFrame;
+    const originalCancel = globalThis.cancelAnimationFrame;
+    const originalSetTimeout = globalThis.setTimeout;
+    globalThis.requestAnimationFrame = vi.fn((callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    globalThis.cancelAnimationFrame = vi.fn();
+    const timer = vi.spyOn(globalThis, 'setTimeout').mockImplementation(
+      ((callback: TimerHandler, delay?: number, ...args: unknown[]) => {
+        if (delay === CONFIG.PLAYLIST_CACHE_WRITE_DELAY_MS) {
+          delayedWrite = () => {
+            if (typeof callback === 'function') callback(...args);
+          };
+          return 1;
+        }
+        return originalSetTimeout(callback, delay, ...args);
+      }) as typeof setTimeout,
+    );
+    try {
+      localStorage.setItem('iptv_playlists', JSON.stringify([
+        { id: 'p1', name: 'Alpha', url: 'http://host/a' },
+      ]));
+      scheduleCachedPlaylist([channel('ch1')]);
+      frames.shift()?.(0);
+      frames.shift()?.(16);
 
-    expect(await getCachedPlaylist()).toEqual({ channels, epgSources: [] });
-    expect(localStorage.getItem('iptv_cached_playlist')).toBeNull();
-    expect(await getCachedPlaylist()).toEqual({ channels, epgSources: [] });
+      localStorage.setItem('iptv_playlists', JSON.stringify([
+        { id: 'p2', name: 'Bravo', url: 'http://host/b' },
+      ]));
+      delayedWrite?.();
+      await flushCacheWrites();
+
+      expect(await getCachedPlaylist()).toBeNull();
+    } finally {
+      globalThis.requestAnimationFrame = originalRequest;
+      globalThis.cancelAnimationFrame = originalCancel;
+      timer.mockRestore();
+    }
+  });
+
+  it.each([
+    ['playlist cache', clearCachedPlaylist],
+    ['all caches', clearAllCachedData],
+  ])('does not restore a scheduled playlist after clearing %s', async (_label, clear) => {
+    const frames: FrameRequestCallback[] = [];
+    let delayedWrite: (() => void) | null = null;
+    const originalRequest = globalThis.requestAnimationFrame;
+    const originalCancel = globalThis.cancelAnimationFrame;
+    const originalSetTimeout = globalThis.setTimeout;
+    globalThis.requestAnimationFrame = vi.fn((callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    globalThis.cancelAnimationFrame = vi.fn();
+    const timer = vi.spyOn(globalThis, 'setTimeout').mockImplementation(
+      ((callback: TimerHandler, delay?: number, ...args: unknown[]) => {
+        if (delay === CONFIG.PLAYLIST_CACHE_WRITE_DELAY_MS) {
+          delayedWrite = () => {
+            if (typeof callback === 'function') callback(...args);
+          };
+          return 1;
+        }
+        return originalSetTimeout(callback, delay, ...args);
+      }) as typeof setTimeout,
+    );
+    try {
+      scheduleCachedPlaylist([channel('ch1')]);
+      frames.shift()?.(0);
+      frames.shift()?.(16);
+
+      await clear();
+      delayedWrite?.();
+      await flushCacheWrites();
+
+      expect(await getCachedPlaylist()).toBeNull();
+    } finally {
+      globalThis.requestAnimationFrame = originalRequest;
+      globalThis.cancelAnimationFrame = originalCancel;
+      timer.mockRestore();
+    }
   });
 
   it('accounts for cache usage by category and resets it on clear', async () => {

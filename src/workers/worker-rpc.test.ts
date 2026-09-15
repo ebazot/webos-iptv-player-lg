@@ -5,6 +5,7 @@ interface TestTasks {
   add: {
     request: { left: number; right: number };
     response: number;
+    chunk: number;
   };
   fail: {
     request: undefined;
@@ -66,7 +67,7 @@ describe('WorkerRpcClient', () => {
     const [clientEndpoint, workerEndpoint] = linkedEndpoints();
     exposeWorkerTasks<TestTasks>(workerEndpoint, {
       add: async ({ left, right }) => {
-        await Promise.resolve();
+        await new Promise(resolve => setTimeout(resolve, 0));
         return left + right;
       },
       fail: () => {
@@ -80,6 +81,36 @@ describe('WorkerRpcClient', () => {
       client.request('add', { left: 4, right: 5 }),
     ])).resolves.toEqual([3, 9]);
     await expect(client.request('fail', undefined)).rejects.toThrow('failed task');
+  });
+
+  it('delivers ordered progress without completing the request', async () => {
+    const [clientEndpoint, workerEndpoint] = linkedEndpoints();
+    let finish!: () => void;
+    exposeWorkerTasks<TestTasks>(workerEndpoint, {
+      add: async ({ left, right }, emitChunk) => {
+        emitChunk(left);
+        await new Promise<void>(resolve => {
+          finish = resolve;
+        });
+        emitChunk(right);
+        return left + right;
+      },
+      fail: () => {
+        throw new Error('failed task');
+      },
+    });
+    const client = new WorkerRpcClient<TestTasks>(clientEndpoint);
+    const chunks: number[] = [];
+    const result = client.request('add', { left: 2, right: 3 }, chunk => {
+      chunks.push(chunk);
+    });
+
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(chunks).toEqual([2]);
+    finish();
+
+    await expect(result).resolves.toBe(5);
+    expect(chunks).toEqual([2, 3]);
   });
 
   it('rejects pending work and terminates explicitly', async () => {

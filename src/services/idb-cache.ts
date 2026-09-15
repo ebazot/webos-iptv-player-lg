@@ -23,8 +23,8 @@ const FALLBACK_BUDGET_BYTES = 384 * 1024 * 1024;
 const MAX_BUDGET_BYTES = 1024 * 1024 * 1024;
 const SUBTITLE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const CLEANUP_MARGIN_BYTES = 4 * 1024 * 1024;
-const PLAYLIST_CACHE_KEY = 'combined';
-const PLAYLIST_CACHE_VERSION = 2;
+// Avoid deserializing pre-cross-check caches that may contain Xtream VOD rows.
+const PLAYLIST_CACHE_KEY = 'combined-v3';
 const ENTRY_META_PREFIX = 'entry:';
 const ENTRY_META_INDEX_KEY = 'entry-index';
 const ENTRY_META_VERSION = 1;
@@ -107,7 +107,6 @@ interface StreamMimeEntry {
 }
 
 interface CachedPlaylistPayload {
-  version: number;
   sourceSignature: string;
   channels: Channel[];
   epgSources: EpgSource[];
@@ -127,6 +126,8 @@ let scheduledPlaylist: {
   channels: Channel[];
   epgSources: EpgSource[];
   timestamp: number;
+  sourceSignature: string;
+  scheduledAt: number;
 } | null = null;
 let playlistFrame: number | null = null;
 let playlistTimer: ReturnType<typeof setTimeout> | null = null;
@@ -146,27 +147,62 @@ function cancelPlaylistSchedule(): void {
   playlistTimer = null;
 }
 
+function discardScheduledPlaylist(reason: 'cache_clear' | 'rescheduled'): void {
+  cancelPlaylistSchedule();
+  if (scheduledPlaylist) {
+    log.info(
+      'Playlist cache write cancelled',
+      'event=playlist.cache.write.cancelled',
+      `reason=${reason}`,
+      `channels=${String(scheduledPlaylist.channels.length)}`,
+      `epg=${String(scheduledPlaylist.epgSources.length)}`,
+    );
+  }
+  scheduledPlaylist = null;
+}
+
 function persistScheduledPlaylist(): void {
   cancelPlaylistSchedule();
   const pending = scheduledPlaylist;
   scheduledPlaylist = null;
   if (!pending) return;
-  void setCachedPlaylist(
+  const started = Date.now();
+  log.info(
+    'Playlist cache write started',
+    'event=playlist.cache.write.started',
+    `channels=${String(pending.channels.length)}`,
+    `epg=${String(pending.epgSources.length)}`,
+    `delayMs=${String(started - pending.scheduledAt)}`,
+  );
+  void setCachedPlaylistWithSignature(
     pending.channels,
     pending.epgSources,
     pending.timestamp,
+    pending.sourceSignature,
   ).then((stored) => {
-    if (!stored) {
+    if (stored) {
+      log.info(
+        'Playlist cache write completed',
+        'event=playlist.cache.write.completed',
+        `channels=${String(pending.channels.length)}`,
+        `epg=${String(pending.epgSources.length)}`,
+        `elapsedMs=${String(Date.now() - started)}`,
+      );
+    } else {
       log.warn(
         'Playlist cache write was not accepted',
         'event=playlist.cache.write.skipped',
         'operation=write',
+        `channels=${String(pending.channels.length)}`,
+        `elapsedMs=${String(Date.now() - started)}`,
       );
     }
   }, (err) => log.error(
     'Playlist cache write failed',
     'event=playlist.cache.write.failed',
     'operation=write',
+    `channels=${String(pending.channels.length)}`,
+    `elapsedMs=${String(Date.now() - started)}`,
     err,
   ));
 }
@@ -177,14 +213,38 @@ export function scheduleCachedPlaylist(
   timestamp = Date.now(),
 ): void {
   if (!channels.length) return;
-  scheduledPlaylist = { channels, epgSources, timestamp };
+  if (scheduledPlaylist) discardScheduledPlaylist('rescheduled');
+  const scheduledAt = Date.now();
+  scheduledPlaylist = {
+    channels,
+    epgSources,
+    timestamp,
+    sourceSignature: playlistSourceSignature(),
+    scheduledAt,
+  };
   cancelPlaylistSchedule();
+  log.info(
+    'Playlist cache write scheduled',
+    'event=playlist.cache.write.scheduled',
+    `channels=${String(channels.length)}`,
+    `epg=${String(epgSources.length)}`,
+    `delayMs=${String(CONFIG.PLAYLIST_CACHE_WRITE_DELAY_MS)}`,
+  );
   if (typeof requestAnimationFrame === 'function') {
     playlistFrame = requestAnimationFrame(() => {
-      playlistFrame = requestAnimationFrame(persistScheduledPlaylist);
+      playlistFrame = requestAnimationFrame(() => {
+        playlistFrame = null;
+        playlistTimer = setTimeout(
+          persistScheduledPlaylist,
+          CONFIG.PLAYLIST_CACHE_WRITE_DELAY_MS,
+        );
+      });
     });
   } else {
-    playlistTimer = setTimeout(persistScheduledPlaylist, 0);
+    playlistTimer = setTimeout(
+      persistScheduledPlaylist,
+      CONFIG.PLAYLIST_CACHE_WRITE_DELAY_MS,
+    );
   }
 }
 
@@ -1202,8 +1262,7 @@ export async function getCachedPlaylist(): Promise<{
   if (raw) {
     const payload = raw.data as CachedPlaylistPayload | undefined;
     if (
-      payload?.version === PLAYLIST_CACHE_VERSION
-      && payload.sourceSignature === playlistSourceSignature()
+      payload?.sourceSignature === playlistSourceSignature()
       && payload.channels?.length
       && (raw.expiresAt === null || raw.expiresAt > Date.now())
     ) {
@@ -1211,33 +1270,7 @@ export async function getCachedPlaylist(): Promise<{
     }
   }
 
-  // TODO: Remove this localStorage cache migration after all supported installs use IndexedDB v4.
-  const legacyKey = CONFIG.STORAGE_PREFIX + 'cached_playlist';
-  try {
-    const legacyRaw = localStorage.getItem(legacyKey);
-    if (!legacyRaw) return null;
-    const legacy = JSON.parse(legacyRaw) as CachedPlaylistPayload;
-    if (
-      legacy.version !== PLAYLIST_CACHE_VERSION
-      || !legacy.channels?.length
-      || Date.now() - legacy.timestamp > CONFIG.PLAYLIST_REFRESH_INTERVAL
-    ) {
-      localStorage.removeItem(legacyKey);
-      return null;
-    }
-    const stored = await setCachedPlaylist(legacy.channels, legacy.epgSources ?? [], legacy.timestamp);
-    if (stored) localStorage.removeItem(legacyKey);
-    return { channels: legacy.channels, epgSources: legacy.epgSources ?? [] };
-  } catch (err) {
-    log.warn(
-      'Legacy playlist cache migration failed',
-      'event=persistence.cache.migration.failed',
-      'operation=migrate',
-      'category=playlist',
-      err,
-    );
-    return null;
-  }
+  return null;
 }
 
 export async function setCachedPlaylist(
@@ -1245,13 +1278,26 @@ export async function setCachedPlaylist(
   epgSources: EpgSource[] = [],
   timestamp = Date.now(),
 ): Promise<boolean> {
-  if (!channels.length) return false;
+  return setCachedPlaylistWithSignature(
+    channels,
+    epgSources,
+    timestamp,
+    playlistSourceSignature(),
+  );
+}
+
+function setCachedPlaylistWithSignature(
+  channels: Channel[],
+  epgSources: EpgSource[],
+  timestamp: number,
+  sourceSignature: string,
+): Promise<boolean> {
+  if (!channels.length) return Promise.resolve(false);
   return putRaw(PLAYLIST_STORE, {
     key: PLAYLIST_CACHE_KEY,
     timestamp,
     data: {
-      version: PLAYLIST_CACHE_VERSION,
-      sourceSignature: playlistSourceSignature(),
+      sourceSignature,
       channels,
       epgSources,
       timestamp,
@@ -1261,6 +1307,7 @@ export async function setCachedPlaylist(
 }
 
 export async function clearCachedPlaylist(): Promise<void> {
+  discardScheduledPlaylist('cache_clear');
   try {
     await clearStore(PLAYLIST_STORE);
   } catch (err) {
@@ -1281,6 +1328,7 @@ export async function clearCachedPlaylist(): Promise<void> {
 }
 
 export async function clearAllCachedData(): Promise<void> {
+  discardScheduledPlaylist('cache_clear');
   return enqueueMutation(async () => {
     try {
       localStorage.removeItem(CONFIG.STORAGE_PREFIX + 'cached_playlist');

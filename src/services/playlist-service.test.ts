@@ -21,9 +21,39 @@ const { storageMock, cacheMock, fetchTextMock } = vi.hoisted(() => ({
 
 vi.mock('./storage-service', () => ({ StorageService: storageMock }));
 vi.mock('./idb-cache', () => cacheMock);
+vi.mock('../parsers/m3u-loader', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../parsers/m3u-loader')>();
+  return {
+    ...actual,
+    fetchAndParseM3U: vi.fn(async (
+      url: string,
+      timeout: number,
+      streams?: Array<{ streamId: string; directSource: string }>,
+      baseUrl?: string,
+    ) => {
+      const text = await fetchTextMock(url, timeout);
+      const { parseM3U } = await import('../parsers/m3u-parser');
+      const filter = actual.createM3UChannelFilter(streams, baseUrl);
+      const data = parseM3U(text, url, filter.accept
+        ? { acceptChannel: filter.accept }
+        : {});
+      return {
+        data,
+        metrics: {
+          transport: 'stream' as const,
+          filter: filter.kind,
+          inputBytes: text.length,
+          chunks: 1,
+          channelsKept: data.channels.length,
+          channelsDropped: filter.dropped(),
+          elapsedMs: 0,
+        },
+      };
+    }),
+  };
+});
 vi.mock('../utils/fetch-helper', async (importOriginal) => ({
   ...await importOriginal<typeof import('../utils/fetch-helper')>(),
-  fetchPlaylistText: fetchTextMock,
   fetchText: fetchTextMock,
   fetchLimitedText: fetchTextMock,
 }));
@@ -305,7 +335,12 @@ http://host:8080/live/u1/p1/102.ts`;
         xtream: { username: 'u1', password: 'p1' } },
     ]);
     fetchTextMock.mockImplementation((url: string) => {
-      if (url.includes('action=get_live_streams')) return Promise.resolve('[]');
+      if (url.includes('action=get_live_streams')) {
+        return Promise.resolve(JSON.stringify([
+          { stream_id: 101, tv_archive: 0 },
+          { stream_id: 102, tv_archive: 0 },
+        ]));
+      }
       if (url.includes('player_api.php')) return Promise.resolve(JSON.stringify({
         server_info: { timezone: 'UTC', timestamp_now: 1784662200, time_now: '2026-07-21 20:30:00' },
       }));
@@ -356,7 +391,19 @@ http://host:8080/live/u1/p1/102.ts`;
     expect(channels.every(c => /\/live\/u1\/p1\/\d+\.ts$/.test(c.url))).toBe(true);
   });
 
-  it('excludes only standard movie and series URLs from the Xtream M3U', async () => {
+  it('does not refetch an unavailable Live catalog when the M3U is usable', async () => {
+    fetchTextMock.mockImplementation((url: string) => {
+      if (url.includes('action=get_live_streams')) return Promise.resolve('<html>nope</html>');
+      if (url.includes('player_api.php')) return Promise.resolve('{}');
+      return Promise.resolve(XT);
+    });
+
+    await PlaylistService.refresh();
+    expect(fetchTextMock.mock.calls.filter(([url]) =>
+      url.includes('action=get_live_streams'))).toHaveLength(1);
+  });
+
+  it('does not guess content type when the Player API Live catalog is unavailable', async () => {
     const mixed = `#EXTM3U
 #EXTINF:-1,Alpha
 http://host:8080/live/u1/p1/101.ts
@@ -371,7 +418,7 @@ http://host:8080/play?path=/series/u1/p1/501.mkv
 #EXTINF:-1,Foxtrot
 not-a-url`;
     fetchTextMock.mockImplementation((url: string) => {
-      if (url.includes('action=get_live_streams')) return Promise.resolve('[]');
+      if (url.includes('action=get_live_streams')) return Promise.resolve('<html>nope</html>');
       if (url.includes('player_api.php')) return Promise.resolve('{}');
       return Promise.resolve(mixed);
     });
@@ -380,10 +427,95 @@ not-a-url`;
 
     expect(channels.map(channel => channel.name)).toEqual([
       'Alpha',
+      'Bravo',
+      'Charlie',
       'Delta',
       'Echo',
       'Foxtrot',
     ]);
+  });
+
+  it('cross-checks alternate routes against the Player API Live catalog', async () => {
+    const mixed = `#EXTM3U
+#EXTINF:-1,Alpha
+http://host:8080/live/u1/p1/101.ts
+#EXTINF:-1,Movie
+http://host:8080/vod/u1/p1/101.mkv
+#EXTINF:-1,Series
+http://host:8080/series/u1/p1/201
+#EXTINF:-1,Bravo
+http://host:8080/play?stream_id=102
+#EXTINF:-1,Movie Query
+http://host:8080/movie/u1/p1/301.mp4?stream_id=102
+#EXTINF:-1,Charlie
+https://host/token/abc?token=new&x=1`;
+    fetchTextMock.mockImplementation((url: string) => {
+      if (url.includes('action=get_live_streams')) {
+        return Promise.resolve(JSON.stringify([
+          { stream_id: 101, tv_archive: 0 },
+          { stream_id: 102, tv_archive: 0 },
+          {
+            stream_id: 103,
+            direct_source: 'https://host/token/abc?x=1&token=old',
+            tv_archive: 0,
+          },
+        ]));
+      }
+      if (url.includes('player_api.php')) return Promise.resolve('{}');
+      return Promise.resolve(mixed);
+    });
+
+    const channels = await PlaylistService.refresh();
+
+    expect(channels.map(channel => channel.name)).toEqual([
+      'Alpha',
+      'Bravo',
+      'Charlie',
+    ]);
+    expect(channels.map(channel => channel.catchupStreamId))
+      .toEqual(['101', '102', '103']);
+  });
+
+  it('keeps M3U metadata for a path-prefixed Xtream portal', async () => {
+    storageMock.getPlaylists.mockReturnValue([
+      { id: 'x', name: 'Acct', url: 'http://host:8080/panel', source: 'xtream',
+        xtream: { username: 'u1', password: 'p1' } },
+    ]);
+    fetchTextMock.mockImplementation((url: string) => {
+      if (url.includes('action=get_live_streams')) {
+        return Promise.resolve(JSON.stringify([
+          { stream_id: 101, tv_archive: 0 },
+        ]));
+      }
+      if (url.includes('player_api.php')) return Promise.resolve('{}');
+      return Promise.resolve(`#EXTM3U
+#EXTINF:-1 custom-field="kept",Alpha
+http://host:8080/panel/live/u1/p1/101.ts`);
+    });
+
+    const channels = await PlaylistService.refresh();
+
+    expect(channels).toHaveLength(1);
+    expect(channels[0]).toMatchObject({
+      name: 'Alpha',
+      sourceAttributes: { 'custom-field': 'kept' },
+      catchupStreamId: '101',
+    });
+  });
+
+  it('treats a successful empty Live catalog as authoritative', async () => {
+    fetchTextMock.mockImplementation((url: string) => {
+      if (url.includes('action=get_live_streams')) return Promise.resolve('[]');
+      if (url.includes('action=get_live_categories')) return Promise.resolve('[]');
+      if (url.includes('player_api.php')) return Promise.resolve('{}');
+      return Promise.resolve(`#EXTM3U
+#EXTINF:-1,Movie
+http://host:8080/movie/u1/p1/201.mp4`);
+    });
+
+    expect(await PlaylistService.refresh()).toEqual([]);
+    expect(fetchTextMock.mock.calls.filter(([url]) =>
+      url.includes('action=get_live_streams'))).toHaveLength(1);
   });
 
   it('does not filter movie and series paths from an ordinary M3U', async () => {
@@ -580,7 +712,7 @@ https://host/token/abc?token=new&x=1`;
     expect(channels.every(channel => channel.catchup === 'xtream')).toBe(true);
   });
 
-  it('reports unmatched archived streams without logging their URLs', async () => {
+  it('drops M3U entries absent from the Live catalog without logging their URLs', async () => {
     fetchTextMock.mockImplementation((url: string) => {
       if (url.includes('action=get_live_streams')) {
         return Promise.resolve(JSON.stringify([
@@ -593,11 +725,9 @@ https://host/token/abc?token=new&x=1`;
     });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-    await PlaylistService.refresh();
+    const channels = await PlaylistService.refresh();
 
-    expect(warn.mock.calls.map(args => args.join(' '))).toContainEqual(
-      expect.stringContaining('event=xtream.catchup.unmatched channels=1'),
-    );
+    expect(channels.map(channel => channel.name)).toEqual(['Alpha']);
     expect(warn.mock.calls.map(args => args.join(' ')).join('\n')).not.toContain('/live/u1/p1/');
     warn.mockRestore();
   });
@@ -656,7 +786,7 @@ describe('PlaylistService.load', () => {
     expect(fetchTextMock).toHaveBeenCalled();
   });
 
-  it('removes cached Xtream VOD memberships while preserving ordinary sources', async () => {
+  it('does not infer cached channel types from their URLs', async () => {
     const cached = [
       channel({
         name: 'Alpha',
@@ -686,8 +816,8 @@ describe('PlaylistService.load', () => {
 
     const result = await PlaylistService.load();
 
-    expect(result.map(channel => channel.name)).toEqual(['Bravo', 'Charlie']);
-    expect(result[0].playlistIds).toEqual(['m']);
+    expect(result.map(channel => channel.name)).toEqual(['Alpha', 'Bravo', 'Charlie']);
+    expect(result[1].playlistIds).toEqual(['x', 'm']);
     expect(fetchTextMock).not.toHaveBeenCalled();
   });
 });

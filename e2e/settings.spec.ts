@@ -737,7 +737,13 @@ test.describe('Settings Xtream live output', () => {
       return route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: action === 'get_live_streams' ? '[]' : '{}',
+        body: action === 'get_live_streams'
+          ? JSON.stringify([{
+              stream_id: 101,
+              direct_source: 'http://streams.example.com/live',
+              tv_archive: 0,
+            }])
+          : '{}',
       });
     });
     await page.addInitScript(() => {

@@ -14,6 +14,9 @@ import { isMpdText } from '../utils/url';
 export interface M3UParseOptions {
   maxChannels?: number;
   maxIssues?: number;
+  acceptChannel?: (channel: Channel) => boolean;
+  channelBatchSize?: number;
+  onChannelBatch?: (channels: Channel[]) => void;
 }
 
 const DEFAULT_MAX_ISSUES = 500;
@@ -24,207 +27,396 @@ export function parseM3U(
   sourceUrl = '',
   options: M3UParseOptions = {},
 ): ParsedPlaylist {
-  const text = stripBom(input);
-  const detection = detectPlaylistFormat(input);
-  const headerAttributes: Record<string, string> = {};
-  const channels: Channel[] = [];
-  const groupSet = new Set<string>();
-  const issues: PlaylistParseIssue[] = [];
-  const maxIssues = options.maxIssues ?? DEFAULT_MAX_ISSUES;
-  const maxChannels = options.maxChannels ?? 0;
-  let current: Channel | null = null;
-  let epgUrls: string[] = [];
-  let maxConnections: number | undefined;
-  let playlistName: string | undefined;
-  let sawHeader = false;
+  const parser = new M3UStreamParser(sourceUrl, options);
+  parser.write(input);
+  return parser.finish();
+}
 
-  const addIssue = (
-    level: PlaylistParseIssue['level'],
-    code: string,
-    message: string,
-    line: number,
-  ): void => {
-    if (issues.length < maxIssues) issues.push({ level, code, message, line });
-  };
+export class M3UStreamParser {
+  private readonly headerAttributes: Record<string, string> = {};
+  private readonly channels: Channel[] = [];
+  private readonly groupSet = new Set<string>();
+  private readonly groupPool = new Map<string, string>();
+  private readonly issues: PlaylistParseIssue[] = [];
+  private readonly maxIssues: number;
+  private readonly maxChannels: number;
+  private readonly acceptChannel?: (channel: Channel) => boolean;
+  private readonly channelBatchSize: number;
+  private readonly onChannelBatch?: (channels: Channel[]) => void;
+  private readonly pendingLines: string[] = [];
+  private lineBuffer = '';
+  private sample = '';
+  private detection: PlaylistFormatDetection | null = null;
+  private current: Channel | null = null;
+  private epgUrls: string[] = [];
+  private maxConnections: number | undefined;
+  private playlistName: string | undefined;
+  private lineNo = 0;
+  private sawHeader = false;
+  private stopped = false;
+  private finished = false;
+  private acceptedChannels = 0;
 
-  if (detection.format === 'dash'
-      || detection.format === 'hls-master'
-      || detection.format === 'hls-media') {
-    const metadata = detection.format === 'dash'
-      ? { attributes: {}, name: undefined }
-      : readPlaylistMetadata(text);
-    Object.assign(headerAttributes, metadata.attributes);
-    epgUrls = collectEpgUrls(metadata.attributes);
-    const maxConn = parseInt(metadata.attributes['max-conn'] || '', 10);
-    if (maxConn > 0) maxConnections = maxConn;
-    if (sourceUrl) {
-      const channel = emptyChannel(nameFromUrl(sourceUrl));
-      channel.url = sourceUrl;
+  constructor(
+    private readonly sourceUrl = '',
+    options: M3UParseOptions = {},
+  ) {
+    this.maxIssues = options.maxIssues ?? DEFAULT_MAX_ISSUES;
+    this.maxChannels = options.maxChannels ?? 0;
+    this.acceptChannel = options.acceptChannel;
+    this.channelBatchSize = options.channelBatchSize ?? 0;
+    this.onChannelBatch = options.onChannelBatch;
+  }
+
+  write(chunk: string): void {
+    if (this.finished) throw new Error('M3U parser is already finished');
+    if (!chunk || this.stopped) return;
+    if (!this.detection && this.sample.length < SAMPLE_CHARS) {
+      this.sample += chunk.slice(0, SAMPLE_CHARS - this.sample.length);
+    }
+    this.lineBuffer += chunk;
+    this.drainLines(false);
+    if (!this.detection && this.sample.length >= SAMPLE_CHARS) this.activate();
+  }
+
+  finish(): ParsedPlaylist {
+    if (this.finished) throw new Error('M3U parser is already finished');
+    this.finished = true;
+    this.drainLines(true);
+    if (!this.detection) this.activate();
+    const detection = this.detection!;
+    this.detachPlaylistMetadata();
+
+    if (isWrappedStreamFormat(detection.format)) {
+      if (this.sourceUrl) {
+        const channel = emptyChannel(nameFromUrl(this.sourceUrl));
+        channel.url = this.sourceUrl;
+        return result(
+          [channel],
+          [UNCATEGORIZED_GROUP],
+          this.epgUrls,
+          this.headerAttributes,
+          detection.format,
+          this.issues,
+          this.maxConnections,
+          this.playlistName,
+        );
+      }
+      const streamType = detection.format === 'dash' ? 'DASH' : 'HLS';
+      this.addIssue(
+        'error',
+        `${detection.format === 'dash' ? 'dash' : 'hls'}-without-source`,
+        `${streamType} input requires its source URL`,
+        1,
+      );
       return result(
-        [channel],
-        [UNCATEGORIZED_GROUP],
-        epgUrls,
-        headerAttributes,
+        [],
+        [],
+        this.epgUrls,
+        this.headerAttributes,
         detection.format,
-        issues,
-        maxConnections,
-        metadata.name,
+        this.issues,
+        this.maxConnections,
+        this.playlistName,
       );
     }
-    const streamType = detection.format === 'dash' ? 'DASH' : 'HLS';
-    addIssue(
-      'error',
-      `${detection.format === 'dash' ? 'dash' : 'hls'}-without-source`,
-      `${streamType} input requires its source URL`,
-      1,
-    );
-    return result(
-      [],
-      [],
-      epgUrls,
-      headerAttributes,
-      detection.format,
-      issues,
-      maxConnections,
-      metadata.name,
-    );
-  }
 
-  if (detection.format === 'xmltv' || detection.format === 'json'
-      || detection.format === 'html') {
-    addIssue(
-      'error',
-      'wrong-format',
-      `Expected an M3U playlist but received ${detection.format}`,
-      1,
-    );
-    return result([], [], [], headerAttributes, detection.format, issues);
-  }
-
-  let lineNo = 0;
-  let position = 0;
-  while (position < text.length) {
-    const lineStart = position;
-    while (position < text.length) {
-      const code = text.charCodeAt(position);
-      if (code === 10 || code === 13) break;
-      position++;
+    if (isWrongDocumentFormat(detection.format)) {
+      this.addIssue(
+        'error',
+        'wrong-format',
+        `Expected an M3U playlist but received ${detection.format}`,
+        1,
+      );
+      return result([], [], [], this.headerAttributes, detection.format, this.issues);
     }
-    const line = text.slice(lineStart, position).trim();
-    if (position < text.length && text.charCodeAt(position) === 13
-        && text.charCodeAt(position + 1) === 10) position += 2;
-    else if (position < text.length) position++;
-    lineNo++;
-    if (!line) continue;
+
+    if (this.current) {
+      this.addIssue(
+        'warning',
+        'orphan-extinf',
+        `"${this.current.name}" has no stream URL; skipped`,
+        this.lineNo,
+      );
+    }
+    if (!this.sawHeader) {
+      this.addIssue('warning', 'missing-extm3u', 'Playlist has no #EXTM3U header', 1);
+    }
+    if (!this.acceptedChannels) {
+      this.addIssue('error', 'no-channels', 'No playable entries were found', 1);
+    }
+    this.flushChannelBatch();
+
+    return result(
+      this.channels,
+      Array.from(this.groupSet),
+      this.epgUrls,
+      this.headerAttributes,
+      detection.format,
+      this.issues,
+      this.maxConnections,
+      this.playlistName,
+    );
+  }
+
+  private drainLines(final: boolean): void {
+    let start = 0;
+    let index = 0;
+    while (index < this.lineBuffer.length) {
+      const code = this.lineBuffer.charCodeAt(index);
+      if (code === 10) {
+        this.queueLine(this.lineBuffer.slice(start, index));
+        start = ++index;
+        continue;
+      }
+      if (code === 13) {
+        if (index + 1 === this.lineBuffer.length && !final) break;
+        this.queueLine(this.lineBuffer.slice(start, index));
+        index += this.lineBuffer.charCodeAt(index + 1) === 10 ? 2 : 1;
+        start = index;
+        continue;
+      }
+      index++;
+    }
+    if (final && start < this.lineBuffer.length) {
+      this.queueLine(this.lineBuffer.slice(start));
+      start = this.lineBuffer.length;
+    }
+    this.lineBuffer = this.lineBuffer.slice(start);
+  }
+
+  private queueLine(rawLine: string): void {
+    if (this.stopped) return;
+    if (!this.detection) this.pendingLines.push(rawLine);
+    else this.processLine(rawLine);
+  }
+
+  private activate(): void {
+    this.detection = detectPlaylistFormat(this.sample);
+    const pending = this.pendingLines.splice(0);
+    for (const line of pending) this.processLine(line);
+  }
+
+  private processLine(rawLine: string): void {
+    if (this.stopped) return;
+    this.lineNo++;
+    const line = (this.lineNo === 1 ? stripBom(rawLine) : rawLine).trim();
+    if (!line) return;
+    const detection = this.detection!;
+    if (detection.format === 'dash' || isWrongDocumentFormat(detection.format)) return;
 
     const tagEnd = directiveEnd(line);
     const tag = tagEnd > 0 ? line.slice(0, tagEnd).toUpperCase() : '';
     const hasColon = tagEnd > 0 && line.charCodeAt(tagEnd) === 58;
     const body = tagEnd > 0 ? line.slice(tagEnd + (hasColon ? 1 : 0)) : '';
 
+    if (isWrappedStreamFormat(detection.format)) {
+      if (tag === '#EXTM3U') this.applyHeader(body);
+      else if (tag === '#PLAYLIST') this.playlistName = body.trim() || undefined;
+      return;
+    }
+
     switch (tag) {
-      case '#EXTM3U': {
-        sawHeader = true;
-        const attrs = scanAttributes(body, 0).values;
-        Object.assign(headerAttributes, attrs);
-        epgUrls = collectEpgUrls(attrs);
-        const maxConn = parseInt(attrs['max-conn'] || '', 10);
-        if (maxConn > 0) maxConnections = maxConn;
+      case '#EXTM3U':
+        this.sawHeader = true;
+        this.applyHeader(body);
         break;
-      }
       case '#EXTINF':
-        if (current) {
-          addIssue(
+        if (this.current) {
+          this.addIssue(
             'warning',
             'orphan-extinf',
-            `"${current.name}" has no stream URL; skipped`,
-            lineNo - 1,
+            `"${this.current.name}" has no stream URL; skipped`,
+            this.lineNo - 1,
           );
         }
-        current = parseExtInf(body);
+        this.current = parseExtInf(body);
         break;
       case '#EXTGRP':
-        if (current) applyGroups(current, body.trim(), true);
+        if (this.current) applyGroups(this.current, body.trim(), true);
         break;
       case '#EXTVLCOPT':
-        if (current) addExtra(current, body, false);
+        if (this.current) addExtra(this.current, body, false);
         break;
       case '#KODIPROP':
-        if (current) addExtra(current, body, true);
+        if (this.current) addExtra(this.current, body, true);
         break;
       case '#EXTHTTP':
-        if (current) parseHttpHeaders(current, body, lineNo, addIssue);
+        if (this.current) {
+          parseHttpHeaders(
+            this.current,
+            body,
+            this.lineNo,
+            (level, code, message, lineNo) =>
+              this.addIssue(level, code, message, lineNo),
+          );
+        }
         break;
       case '#PLAYLIST':
-        playlistName = body.trim() || undefined;
+        this.playlistName = body.trim() || undefined;
         break;
       default:
-        if (line.charCodeAt(0) === 35) break;
-        if (!current && detection.format === 'unknown' && !isPlaylistLocation(line)) {
-          addIssue(
-            'warning',
-            'unrecognized-line',
-            'Ignored a line that is not a stream location',
-            lineNo,
-          );
-          break;
-        }
-        if (!current) current = emptyChannel(nameFromUrl(line));
-        current.url = line;
-        if (current.catchup.toLowerCase() === 'xc' && !current.catchupSource) {
-          const inferred = xtreamCredentialsFromLiveUrl(line);
-          if (inferred) {
-            current.catchupSource = xtreamCatchupSource(
-              inferred.credentials,
-              inferred.streamId,
-              inferred.output,
-            );
-            current.catchup = 'xtream';
-            current.catchupStreamId = inferred.streamId;
-          }
-        }
-        if (current.group) groupSet.add(current.group);
-        for (const group of current.sourceGroups ?? []) groupSet.add(group);
-        channels.push(current);
-        current = null;
-        if (maxChannels > 0 && channels.length >= maxChannels) {
-          addIssue(
-            'warning',
-            'channel-limit',
-            `Stopped after ${String(maxChannels)} channels`,
-            lineNo,
-          );
-          position = text.length;
-        }
+        this.processLocation(line, detection.format);
         break;
     }
   }
 
-  if (current) {
-    addIssue(
-      'warning',
-      'orphan-extinf',
-      `"${current.name}" has no stream URL; skipped`,
-      lineNo,
-    );
-  }
-  if (!sawHeader) {
-    addIssue('warning', 'missing-extm3u', 'Playlist has no #EXTM3U header', 1);
-  }
-  if (!channels.length) {
-    addIssue('error', 'no-channels', 'No playable entries were found', 1);
+  private applyHeader(body: string): void {
+    const attrs = scanAttributes(body, 0).values;
+    Object.assign(this.headerAttributes, attrs);
+    this.epgUrls = collectEpgUrls(this.headerAttributes);
+    const maxConn = parseInt(attrs['max-conn'] || '', 10);
+    if (maxConn > 0) this.maxConnections = maxConn;
   }
 
-  return result(
-    channels,
-    Array.from(groupSet),
-    epgUrls,
-    headerAttributes,
-    detection.format,
-    issues,
-    maxConnections,
-    playlistName,
-  );
+  private processLocation(line: string, format: ParsedPlaylist['format']): void {
+    if (line.charCodeAt(0) === 35) return;
+    if (!this.current && format === 'unknown' && !isPlaylistLocation(line)) {
+      this.addIssue(
+        'warning',
+        'unrecognized-line',
+        'Ignored a line that is not a stream location',
+        this.lineNo,
+      );
+      return;
+    }
+    if (!this.current) this.current = emptyChannel(nameFromUrl(line));
+    this.current.url = line;
+    if (this.current.catchup.toLowerCase() === 'xc' && !this.current.catchupSource) {
+      const inferred = xtreamCredentialsFromLiveUrl(line);
+      if (inferred) {
+        this.current.catchupSource = xtreamCatchupSource(
+          inferred.credentials,
+          inferred.streamId,
+          inferred.output,
+        );
+        this.current.catchup = 'xtream';
+        this.current.catchupStreamId = inferred.streamId;
+      }
+    }
+    const channel = this.current;
+    this.current = null;
+    if (this.acceptChannel && !this.acceptChannel(channel)) return;
+    channel.group = this.internGroup(channel.group);
+    if (channel.sourceGroups) {
+      channel.sourceGroups = channel.sourceGroups.map(group => this.internGroup(group));
+    }
+    detachChannelStrings(channel);
+    if (channel.group) this.groupSet.add(channel.group);
+    for (const group of channel.sourceGroups ?? []) this.groupSet.add(group);
+    this.channels.push(channel);
+    this.acceptedChannels++;
+    if (this.onChannelBatch
+        && this.channelBatchSize > 0
+        && this.channels.length >= this.channelBatchSize) {
+      this.flushChannelBatch();
+    }
+    if (this.maxChannels > 0 && this.acceptedChannels >= this.maxChannels) {
+      this.addIssue(
+        'warning',
+        'channel-limit',
+        `Stopped after ${String(this.maxChannels)} channels`,
+        this.lineNo,
+      );
+      this.stopped = true;
+    }
+  }
+
+  private flushChannelBatch(): void {
+    if (!this.onChannelBatch || !this.channels.length) return;
+    const batch = this.channels.splice(0);
+    this.onChannelBatch(batch);
+  }
+
+  private addIssue(
+    level: PlaylistParseIssue['level'],
+    code: string,
+    message: string,
+    line: number,
+  ): void {
+    if (this.issues.length < this.maxIssues) {
+      this.issues.push({ level, code, message, line });
+    }
+  }
+
+  private internGroup(group: string): string {
+    const existing = this.groupPool.get(group);
+    if (existing) return existing;
+    const detached = copyRetainedStrings([group])[0];
+    this.groupPool.set(detached, detached);
+    return detached;
+  }
+
+  private detachPlaylistMetadata(): void {
+    const keys = Object.keys(this.headerAttributes);
+    const values = copyRetainedStrings(keys.map(key => this.headerAttributes[key]));
+    for (let index = 0; index < keys.length; index++) {
+      this.headerAttributes[keys[index]] = values[index];
+    }
+    this.epgUrls = copyRetainedStrings(this.epgUrls);
+    if (this.playlistName) {
+      this.playlistName = copyRetainedStrings([this.playlistName])[0];
+    }
+  }
+}
+
+function isWrappedStreamFormat(format: ParsedPlaylist['format']): boolean {
+  return format === 'dash' || format === 'hls-master' || format === 'hls-media';
+}
+
+function isWrongDocumentFormat(format: ParsedPlaylist['format']): boolean {
+  return format === 'xmltv' || format === 'json' || format === 'html';
+}
+
+const CHANNEL_STRING_KEYS = [
+  'id',
+  'name',
+  'logo',
+  'url',
+  'catchup',
+  'catchupSource',
+] as const;
+const OPTIONAL_CHANNEL_STRING_KEYS = [
+  'sourceName',
+  'sourceGroup',
+  'groupKey',
+  'catchupAccountId',
+  'catchupStreamId',
+  'catchupTimeZone',
+] as const;
+
+function detachChannelStrings(channel: Channel): void {
+  const optionalKeys = OPTIONAL_CHANNEL_STRING_KEYS
+    .filter(key => typeof channel[key] === 'string');
+  const extraKeys = channel.extras ? Object.keys(channel.extras) : [];
+  const attributeKeys = channel.sourceAttributes ? Object.keys(channel.sourceAttributes) : [];
+  const headerKeys = channel.httpHeaders ? Object.keys(channel.httpHeaders) : [];
+  const values: string[] = [];
+  for (const key of CHANNEL_STRING_KEYS) values.push(channel[key]);
+  for (const key of optionalKeys) values.push(channel[key]!);
+  for (const key of extraKeys) values.push(channel.extras![key]);
+  for (const key of attributeKeys) values.push(channel.sourceAttributes![key]);
+  for (const key of headerKeys) values.push(channel.httpHeaders![key]);
+  const copies = copyRetainedStrings(values);
+  let index = 0;
+  for (const key of CHANNEL_STRING_KEYS) channel[key] = copies[index++];
+  for (const key of optionalKeys) channel[key] = copies[index++];
+  for (const key of extraKeys) channel.extras![key] = copies[index++];
+  for (const key of attributeKeys) channel.sourceAttributes![key] = copies[index++];
+  for (const key of headerKeys) channel.httpHeaders![key] = copies[index++];
+}
+
+function copyRetainedStrings(values: readonly string[]): string[] {
+  if (!values.length) return [];
+  const joined = `\0${values.join('\0')}\0`;
+  const copies = new Array<string>(values.length);
+  let offset = 1;
+  for (let index = 0; index < values.length; index++) {
+    const value = values[index];
+    copies[index] = joined.slice(offset, offset + value.length);
+    offset += value.length + 1;
+  }
+  return copies;
 }
 
 export function parseM3UBytes(
@@ -308,36 +500,6 @@ function result(
     format,
     issues,
   };
-}
-
-function readPlaylistMetadata(text: string): {
-  attributes: Record<string, string>;
-  name?: string;
-} {
-  const attributes: Record<string, string> = {};
-  let name: string | undefined;
-  let position = 0;
-  while (position < text.length) {
-    const start = position;
-    while (position < text.length) {
-      const code = text.charCodeAt(position);
-      if (code === 10 || code === 13) break;
-      position++;
-    }
-    const line = text.slice(start, position).trim();
-    if (position < text.length && text.charCodeAt(position) === 13
-        && text.charCodeAt(position + 1) === 10) position += 2;
-    else if (position < text.length) position++;
-    const tagEnd = directiveEnd(line);
-    if (tagEnd <= 0) continue;
-    const tag = line.slice(0, tagEnd).toUpperCase();
-    const body = line.charCodeAt(tagEnd) === 58
-      ? line.slice(tagEnd + 1)
-      : line.slice(tagEnd);
-    if (tag === '#EXTM3U') Object.assign(attributes, scanAttributes(body, 0).values);
-    else if (tag === '#PLAYLIST') name = body.trim() || undefined;
-  }
-  return { attributes, name };
 }
 
 function parseExtInf(body: string): Channel {

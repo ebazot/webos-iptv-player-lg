@@ -457,6 +457,14 @@ exit 23
         observedAt: '2026-01-01T00:00:03.000Z',
         source: 'console',
         level: 'log',
+        text: '[M3ULoad] event=playlist.m3u.load.failed stage=decode_parse'
+          + ' reason=exception transport=stream filter=live_catalog'
+          + ' bytes=16777216 chunks=64 kept=8192 dropped=12000 elapsedMs=4500',
+      },
+      {
+        observedAt: '2026-01-01T00:00:04.000Z',
+        source: 'console',
+        level: 'log',
         text: '[Player] ordinary log',
       },
     ]);
@@ -478,6 +486,17 @@ exit 23
         generation: 2,
         active: 1,
         reason: 'execution_error',
+      }),
+      expect.objectContaining({
+        code: 'playlist.m3u.load.failed',
+        stage: 'decode_parse',
+        transport: 'stream',
+        filter: 'live_catalog',
+        bytes: 16777216,
+        chunks: 64,
+        kept: 8192,
+        dropped: 12000,
+        elapsedMs: 4500,
       }),
     ]);
   });
@@ -560,6 +579,13 @@ exit 23
         observedAt: '2026-01-01T00:00:01.000Z',
         source: 'console',
         level: 'log',
+        text: '[Playlist] event=xtream.live_catalog.completed'
+          + ' load=2 available=1 items=32000 elapsedMs=4100',
+      },
+      {
+        observedAt: '2026-01-01T00:00:02.000Z',
+        source: 'console',
+        level: 'log',
         text: '[Xtream] ordinary log',
       },
     ]);
@@ -573,7 +599,52 @@ exit 23
       items: 12,
       timeoutMs: 30000,
       limitBytes: 33554432,
+    }), expect.objectContaining({
+      event: 'xtream.live_catalog.completed',
+      load: 2,
+      available: 1,
+      items: 32000,
+      elapsedMs: 4100,
     })]);
+  });
+
+  it('formats parser, worker, catalog, and cache lifecycle fields', () => {
+    const diagnostics = extractDiagnosticTimeline([
+      {
+        observedAt: '2026-01-01T00:00:00.000Z',
+        source: 'console',
+        level: 'log',
+        text: '[AppWorker] event=worker.task.completed task=xmltv.load'
+          + ' generation=3 batches=257 progress=8 elapsedMs=9000',
+      },
+      {
+        observedAt: '2026-01-01T00:00:01.000Z',
+        source: 'console',
+        level: 'log',
+        text: '[CacheStorage] event=playlist.cache.write.started'
+          + ' channels=38000 epg=2 delayMs=1300',
+      },
+    ]);
+    const summary = formatDiagnosticSummary({
+      capturedAt: '2026-01-01T00:00:02.000Z',
+      app: {},
+      environment: {},
+      state: {},
+      playlists: [],
+      diagnostics,
+      input: [],
+      xtream: [],
+      logs: [],
+      network: [],
+    });
+
+    expect(summary).toContain(
+      'worker.task.completed generation=3 task=xmltv.load'
+        + ' batches=257 progress=8 elapsedMs=9000',
+    );
+    expect(summary).toContain(
+      'playlist.cache.write.started channels=38000 epg=2 delayMs=1300',
+    );
   });
 
   it('does not leak probe secrets into the assembled report', () => {

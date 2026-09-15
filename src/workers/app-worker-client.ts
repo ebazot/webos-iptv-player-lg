@@ -1,8 +1,8 @@
 import { WorkerRpcClient } from './worker-rpc';
 import type { AppWorkerTasks } from './tasks';
 import { createLogger } from '../utils/logger';
+import { CONFIG } from '../config';
 
-const IDLE_TERMINATION_MS = 1000;
 const log = createLogger('AppWorker');
 let client: WorkerRpcClient<AppWorkerTasks> | null = null;
 let currentGeneration: number | null = null;
@@ -47,11 +47,68 @@ function appWorkerClient(): WorkerRpcClient<AppWorkerTasks> {
 export async function runAppWorkerTask<TaskName extends keyof AppWorkerTasks & string>(
   task: TaskName,
   payload: AppWorkerTasks[TaskName]['request'],
+  onChunk?: (
+    chunk: AppWorkerTasks[TaskName] extends { chunk: infer Chunk } ? Chunk : never
+  ) => void,
 ): Promise<AppWorkerTasks[TaskName]['response']> {
   clearIdleTimer();
   activeRequests++;
+  const taskClient = appWorkerClient();
+  const generation = currentGeneration;
+  const started = Date.now();
+  let batches = 0;
+  let progress = 0;
+  const diagnosticTask = task === 'm3u.load' || task === 'xmltv.load';
+  const handleChunk = onChunk && diagnosticTask
+    ? (chunk: Parameters<NonNullable<typeof onChunk>>[0]) => {
+        if (chunk && typeof chunk === 'object' && 'kind' in chunk) {
+          const kind = (chunk as { kind?: unknown }).kind;
+          if (kind === 'channels' || kind === 'programmes') batches++;
+          else if (kind === 'progress') progress++;
+        }
+        onChunk(chunk);
+      }
+    : onChunk;
+  if (diagnosticTask) {
+    log.info(
+      'App worker task started',
+      'event=worker.task.started',
+      `task=${task}`,
+      `generation=${String(generation ?? 'unknown')}`,
+      `active=${String(activeRequests)}`,
+    );
+  }
   try {
-    return await appWorkerClient().request(task, payload);
+    const response = await taskClient.request(task, payload, handleChunk);
+    if (diagnosticTask) {
+      log.info(
+        'App worker task completed',
+        'event=worker.task.completed',
+        `task=${task}`,
+        `generation=${String(generation ?? 'unknown')}`,
+        `batches=${String(batches)}`,
+        `progress=${String(progress)}`,
+        `elapsedMs=${String(Date.now() - started)}`,
+      );
+    }
+    return response;
+  } catch (error) {
+    if (diagnosticTask) {
+      log.error(
+        'App worker task failed',
+        'event=worker.task.failed',
+        `task=${task}`,
+        `generation=${String(generation ?? 'unknown')}`,
+        `batches=${String(batches)}`,
+        `progress=${String(progress)}`,
+        `elapsedMs=${String(Date.now() - started)}`,
+        `reason=${error instanceof Error && error.name === 'AbortError'
+          ? 'aborted'
+          : 'request_failed'}`,
+        error,
+      );
+    }
+    throw error;
   } finally {
     activeRequests--;
     scheduleIdleTermination();
@@ -98,5 +155,8 @@ function clearIdleTimer(): void {
 function scheduleIdleTermination(): void {
   if (activeRequests !== 0 || retainCount !== 0 || !client) return;
   clearIdleTimer();
-  idleTimer = setTimeout(() => terminateAppWorker('idle'), IDLE_TERMINATION_MS);
+  idleTimer = setTimeout(
+    () => terminateAppWorker('idle'),
+    CONFIG.WORKER_IDLE_TERMINATION_MS,
+  );
 }

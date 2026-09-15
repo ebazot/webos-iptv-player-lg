@@ -1,18 +1,39 @@
 import { Gunzip } from 'fflate';
-import { XMLTVStreamParser, type XMLTVParseOptions } from './xmltv-parser';
+import {
+  XMLTVStreamParser,
+  type XMLTVParseOptions,
+  type XMLTVRecordSink,
+} from './xmltv-parser';
 import { runAppWorkerTask } from '../workers/app-worker-client';
-import type { XMLTVWorkerRequest, XMLTVWorkerResponse } from '../workers/tasks';
+import type {
+  XMLTVWorkerChunk,
+  XMLTVWorkerRequest,
+  XMLTVWorkerResponse,
+} from '../workers/tasks';
+import type { EpgChannel, ParsedEpg, Programme } from '../types';
 import { createLogger } from '../utils/logger';
 
 export type XMLTVLoadResult = XMLTVWorkerResponse;
 const log = createLogger('XMLTVLoad');
+const CHANNEL_BATCH_SIZE = 128;
+const PROGRAMME_BATCH_SIZE = 256;
+const PROGRESS_INTERVAL_BYTES = 8 * 1024 * 1024;
 
 export async function fetchAndParseXMLTV(
   url: string,
   timeout = 30000,
   options: XMLTVParseOptions = {},
 ): Promise<XMLTVLoadResult> {
+  const started = Date.now();
+  log.info(
+    'XMLTV stream load started',
+    'event=epg.xmltv.load.started',
+    `filter=${options.channelIds || options.channelNames ? 'channel_subset' : 'none'}`,
+    `items=${String(options.channelIds?.size ?? options.channelNames?.size ?? 0)}`,
+    `timeoutMs=${String(timeout)}`,
+  );
   try {
+    const accumulator = new XMLTVAccumulator();
     const result = await runAppWorkerTask('xmltv.load', {
       url,
       timeout,
@@ -23,7 +44,21 @@ export async function fetchAndParseXMLTV(
         retainChannelCatalog: options.retainChannelCatalog,
         maxProgrammes: options.maxProgrammes,
       },
+    }, chunk => {
+      if (chunk.kind === 'progress') {
+        log.info(
+          'XMLTV stream load progress',
+          'event=epg.xmltv.load.progress',
+          `attempt=${String(chunk.attempt)}`,
+          `encoding=${chunk.encoding}`,
+          `bytes=${String(chunk.inputBytes)}`,
+          `chunks=${String(chunk.chunks)}`,
+        );
+        return;
+      }
+      accumulator.accept(chunk);
     });
+    result.data = accumulator.complete(result.data);
     if (result.metrics.attempts > 1) logRetry();
     logCompleted(result);
     return result;
@@ -37,7 +72,20 @@ export async function fetchAndParseXMLTV(
         `pass=${details.pass}`,
         `stage=${details.stage}`,
         `reason=${details.reason}`,
-        `elapsed=${String(details.elapsedMs)}ms`,
+        `transport=${details.transport}`,
+        `encoding=${details.encoding}`,
+        `bytes=${String(details.inputBytes)}`,
+        `chunks=${String(details.chunks)}`,
+        `elapsedMs=${String(details.elapsedMs)}`,
+        error,
+      );
+    } else {
+      log.error(
+        'XMLTV stream load failed',
+        'event=epg.xmltv.load.failed',
+        'stage=worker',
+        'reason=exception',
+        `elapsedMs=${String(Date.now() - started)}`,
         error,
       );
     }
@@ -65,7 +113,7 @@ function logCompleted(result: XMLTVWorkerResponse): void {
     `chunks=${String(metrics.chunks)}`,
     `programmes=${String(result.stats.programmesKept)}`,
     `dropped=${String(result.stats.droppedBudget)}`,
-    `elapsed=${String(metrics.elapsedMs)}ms`,
+    `elapsedMs=${String(metrics.elapsedMs)}`,
   );
 }
 
@@ -75,6 +123,10 @@ function workerFailureDetails(error: unknown): {
   reason: string;
   elapsedMs: number;
   retried: boolean;
+  transport: 'stream' | 'array_buffer';
+  encoding: 'gzip' | 'plain';
+  inputBytes: number;
+  chunks: number;
 } | null {
   if (!(error instanceof Error) || !('details' in error)) return null;
   const details = error.details;
@@ -85,12 +137,20 @@ function workerFailureDetails(error: unknown): {
     && typeof value.reason === 'string'
     && typeof value.elapsedMs === 'number'
     && typeof value.retried === 'boolean'
+    && (value.transport === 'stream' || value.transport === 'array_buffer')
+    && (value.encoding === 'gzip' || value.encoding === 'plain')
+    && typeof value.inputBytes === 'number'
+    && typeof value.chunks === 'number'
     ? {
         pass: value.pass,
         stage: value.stage,
         reason: value.reason,
         elapsedMs: value.elapsedMs,
         retried: value.retried,
+        transport: value.transport,
+        encoding: value.encoding,
+        inputBytes: value.inputBytes,
+        chunks: value.chunks,
       }
     : null;
 }
@@ -101,6 +161,10 @@ interface XMLTVWorkerFailureDetails {
   reason: 'timeout' | 'http' | 'exception';
   elapsedMs: number;
   retried: boolean;
+  transport: 'stream' | 'array_buffer';
+  encoding: 'gzip' | 'plain';
+  inputBytes: number;
+  chunks: number;
 }
 
 class XMLTVWorkerError extends Error {
@@ -115,17 +179,26 @@ class XMLTVWorkerError extends Error {
 
 export async function fetchAndParseXMLTVInWorker(
   request: XMLTVWorkerRequest,
+  emitChunk?: (chunk: XMLTVWorkerChunk) => void,
 ): Promise<XMLTVWorkerResponse> {
   const started = Date.now();
   const options = deserializeOptions(request);
-  const first = await parsePass(request.url, request.timeout, options, 'initial', false);
+  const first = await parsePass(
+    request.url,
+    request.timeout,
+    options,
+    'initial',
+    false,
+    emitChunk,
+    1,
+  );
   if (!first.parser.needsOrderRetry()) {
     return createResponse(first, 1, Date.now() - started);
   }
   const retry = await parsePass(request.url, request.timeout, {
     ...options,
     channelIds: first.parser.acceptedChannelIds(),
-  }, 'retry', true);
+  }, 'retry', true, emitChunk, 2);
   retry.inputBytes += first.inputBytes;
   retry.chunks += first.chunks;
   return createResponse(retry, 2, Date.now() - started);
@@ -137,6 +210,8 @@ async function parsePass(
   options: XMLTVParseOptions,
   pass: 'initial' | 'retry',
   retried: boolean,
+  emitChunk?: (chunk: XMLTVWorkerChunk) => void,
+  attempt = 1,
 ): Promise<{
   data: XMLTVWorkerResponse['data'];
   parser: XMLTVStreamParser;
@@ -154,6 +229,7 @@ async function parsePass(
   let transport: 'stream' | 'array_buffer' = 'stream';
   let inputBytes = 0;
   let chunks = 0;
+  let nextProgressBytes = PROGRESS_INTERVAL_BYTES;
   const started = Date.now();
   try {
     const response = await fetch(url, { signal: controller.signal });
@@ -162,7 +238,9 @@ async function parsePass(
     reader = typeof response.body?.getReader === 'function'
       ? response.body.getReader()
       : null;
-    const parser = new XMLTVStreamParser(options);
+    emitChunk?.({ kind: 'reset', attempt });
+    const batcher = emitChunk ? new XMLTVBatcher(attempt, emitChunk) : undefined;
+    const parser = new XMLTVStreamParser(options, batcher);
     if (!reader) {
       transport = 'array_buffer';
       stage = 'decode_parse';
@@ -170,10 +248,12 @@ async function parsePass(
       inputBytes = bytes.length;
       chunks = bytes.length ? 1 : 0;
       encoding = isGzip(bytes) ? 'gzip' : 'plain';
+      emitProgress();
       consumeBytes(bytes, encoding === 'gzip', parser);
     } else {
       let prefix: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
       while (prefix.length < 2) {
+        stage = 'read';
         const next = await reader.read();
         if (next.done) {
           complete = true;
@@ -190,9 +270,12 @@ async function parsePass(
       if (prefix.length) {
         inputBytes += prefix.length;
         chunks++;
+        emitProgress();
+        stage = 'decode_parse';
         consumeChunk(prefix, parser, decoder, gunzip);
       }
       while (!complete) {
+        stage = 'read';
         const next = await reader.read();
         if (next.done) {
           complete = true;
@@ -201,16 +284,21 @@ async function parsePass(
         if (next.value?.length) {
           inputBytes += next.value.length;
           chunks++;
+          emitProgress();
+          stage = 'decode_parse';
           consumeChunk(next.value, parser, decoder, gunzip);
         }
       }
+      stage = 'decode_parse';
       if (gunzip) gunzip.push(new Uint8Array(0), true);
       const tail = decoder.decode();
       if (tail) parser.write(tail);
     }
     stage = 'finish';
+    const data = parser.finish();
+    batcher?.flush();
     return {
-      data: parser.finish(),
+      data,
       parser,
       encoding,
       transport,
@@ -230,11 +318,133 @@ async function parsePass(
       reason,
       elapsedMs: Date.now() - started,
       retried,
+      transport,
+      encoding,
+      inputBytes,
+      chunks,
     });
   } finally {
     if (reader && !complete) void reader.cancel().catch(() => {});
     clearTimeout(timer);
   }
+
+  function emitProgress(): void {
+    if (!emitChunk || inputBytes < nextProgressBytes) return;
+    emitChunk({
+      kind: 'progress',
+      attempt,
+      encoding,
+      inputBytes,
+      chunks,
+    });
+    while (nextProgressBytes <= inputBytes) {
+      nextProgressBytes += PROGRESS_INTERVAL_BYTES;
+    }
+  }
+}
+
+class XMLTVBatcher implements XMLTVRecordSink {
+    private channels: Array<[string, EpgChannel]> = [];
+    private programmes = new Map<string, Programme[]>();
+    private programmeCount = 0;
+
+    constructor(
+      private readonly attempt: number,
+      private readonly emit: (chunk: XMLTVWorkerChunk) => void,
+    ) {}
+
+    channel(id: string, channel: EpgChannel): void {
+      this.channels.push([id, channel]);
+      if (this.channels.length >= CHANNEL_BATCH_SIZE) this.flushChannels();
+    }
+
+    programme(id: string, programme: Programme): void {
+      const list = this.programmes.get(id);
+      if (list) list.push(programme);
+      else this.programmes.set(id, [programme]);
+      this.programmeCount++;
+      if (this.programmeCount >= PROGRAMME_BATCH_SIZE) this.flushProgrammes();
+    }
+
+    flush(): void {
+      this.flushChannels();
+      this.flushProgrammes();
+    }
+
+    private flushChannels(): void {
+      if (!this.channels.length) return;
+      this.emit({
+        kind: 'channels',
+        attempt: this.attempt,
+        entries: this.channels,
+      });
+      this.channels = [];
+    }
+
+    private flushProgrammes(): void {
+      if (!this.programmeCount) return;
+      this.emit({
+        kind: 'programmes',
+        attempt: this.attempt,
+        entries: Array.from(this.programmes),
+      });
+      this.programmes = new Map();
+      this.programmeCount = 0;
+    }
+  }
+
+class XMLTVAccumulator {
+    private attempt = 0;
+    private channels: Record<string, EpgChannel> = {};
+    private programmes: Record<string, Programme[]> = {};
+    private lastStartByChannel = new Map<string, number>();
+    private unsortedChannels = new Set<string>();
+
+    accept(chunk: XMLTVWorkerChunk): void {
+      if (chunk.kind === 'reset') {
+        if (chunk.attempt < this.attempt) return;
+        this.attempt = chunk.attempt;
+        this.channels = {};
+        this.programmes = {};
+        this.lastStartByChannel = new Map();
+        this.unsortedChannels = new Set();
+        return;
+      }
+      if (chunk.attempt !== this.attempt) return;
+      if (chunk.kind === 'channels') {
+        for (const [id, channel] of chunk.entries) this.channels[id] = channel;
+        return;
+      }
+      if (chunk.kind === 'progress') return;
+      for (const [id, incoming] of chunk.entries) {
+        const list = this.programmes[id] ?? (this.programmes[id] = []);
+        for (const programme of incoming) {
+          const start = programme.start.getTime();
+          const previous = this.lastStartByChannel.get(id);
+          if (previous !== undefined && start < previous) this.unsortedChannels.add(id);
+          this.lastStartByChannel.set(id, start);
+          list.push(programme);
+        }
+      }
+    }
+
+    complete(metadata: ParsedEpg): ParsedEpg {
+      for (const id of this.unsortedChannels) {
+        const list = this.programmes[id];
+        const ordered = list.map((programme, index) => ({ programme, index }));
+        ordered.sort((left, right) =>
+          left.programme.start.getTime() - right.programme.start.getTime()
+          || left.index - right.index);
+        for (let index = 0; index < ordered.length; index++) {
+          list[index] = ordered[index].programme;
+        }
+      }
+      return {
+        ...metadata,
+        channels: this.channels,
+        programmes: this.programmes,
+      };
+    }
 }
 
 function consumeBytes(

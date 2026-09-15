@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   decodePlaylistBytes,
   detectPlaylistFormat,
+  M3UStreamParser,
   parseM3U,
   parseM3UBytes,
 } from './m3u-parser';
@@ -233,6 +234,40 @@ describe('parseM3U', () => {
   it('ignores blank lines and CRLF line endings', () => {
     const m3u = '#EXTM3U\r\n\r\n#EXTINF:-1,Ch\r\nhttp://e/1\r\n';
     expect(parseM3U(m3u).channels).toHaveLength(1);
+  });
+
+  it('preserves parser semantics across arbitrary chunk boundaries', () => {
+    const m3u = [
+      '#EXTM3U url-tvg="http://host/guide.xml"',
+      '#EXTINF:-1 tvg-id="ch1" group-title="Alpha;Bravo" custom="v",Channel',
+      '#EXTVLCOPT:http-user-agent=Agent',
+      '#KODIPROP:inputstream.adaptive.license_type=clearkey',
+      '#EXTHTTP:{"Referer":"http://host/a"}',
+      'http://host/live/u1/p1/42.ts',
+    ].join('\r\n');
+    const parser = new M3UStreamParser();
+    for (let index = 0; index < m3u.length; index++) {
+      parser.write(m3u.slice(index, index + 1));
+    }
+
+    expect(parser.finish()).toEqual(parseM3U(m3u));
+  });
+
+  it('filters a completed entry before retaining its groups', () => {
+    const parser = new M3UStreamParser('', {
+      acceptChannel: channel => channel.url.endsWith('/keep'),
+    });
+    parser.write([
+      '#EXTM3U',
+      '#EXTINF:-1 group-title="Dropped",Drop',
+      'http://host/drop',
+      '#EXTINF:-1 group-title="Kept",Keep',
+      'http://host/keep',
+    ].join('\n'));
+
+    const result = parser.finish();
+    expect(result.channels.map(channel => channel.name)).toEqual(['Keep']);
+    expect(result.groups).toEqual(['Kept']);
   });
 
   it('accepts lone CR line endings', () => {

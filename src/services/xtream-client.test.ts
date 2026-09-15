@@ -190,6 +190,20 @@ describe('XtreamClient live archive metadata', () => {
     expect(await createXtreamClient(creds).getLiveStreams()).toEqual([]);
     expect(await createXtreamClient(creds).getServerClock()).toBeNull();
   });
+
+  it('distinguishes an empty Live catalog from an unavailable endpoint', async () => {
+    fetchTextMock.mockResolvedValueOnce('[]');
+    expect(await createXtreamClient(creds).getLiveStreamsResult()).toEqual({
+      available: true,
+      streams: [],
+    });
+
+    fetchTextMock.mockResolvedValueOnce('<html>nope</html>');
+    expect(await createXtreamClient(creds).getLiveStreamsResult()).toEqual({
+      available: false,
+      streams: [],
+    });
+  });
 });
 
 describe('XtreamClient program archive listings', () => {

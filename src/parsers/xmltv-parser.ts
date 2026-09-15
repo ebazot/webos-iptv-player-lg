@@ -21,6 +21,11 @@ export interface XMLTVParseOptions {
   maxProgrammes?: number;
 }
 
+export interface XMLTVRecordSink {
+  channel(id: string, channel: EpgChannel): void;
+  programme(id: string, programme: Programme): void;
+}
+
 export interface XMLTVParseStats {
   channelsSeen: number;
   channelsKept: number;
@@ -87,7 +92,10 @@ export class XMLTVStreamParser {
   private tzOffsetMinutes: number | null = null;
   private sourceName: string | undefined;
 
-  constructor(private readonly options: XMLTVParseOptions = {}) {
+  constructor(
+    private readonly options: XMLTVParseOptions = {},
+    private readonly sink?: XMLTVRecordSink,
+  ) {
     const now = options.nowMs ?? Date.now();
     this.minTime = now - 7 * DAY_MS;
     this.maxTime = now + 7 * DAY_MS;
@@ -108,7 +116,7 @@ export class XMLTVStreamParser {
     if (this.ended) throw new Error('XMLTV parser already finished');
     this.ended = true;
     this.drain(true);
-    this.sortUnorderedProgrammes();
+    if (!this.sink) this.sortUnorderedProgrammes();
     this.logStats();
     this.buffer = '';
     this.cursor = 0;
@@ -258,11 +266,13 @@ export class XMLTVStreamParser {
     const retainedNames = retainDisplayNames(displayNames, this.options.channelNames);
     const names = copyStrings(retainedNames.length ? retainedNames : [id]);
     const icon = copyString(readElementAttribute(body, 'icon', 'src') ?? '');
-    this.channels[id] = {
+    const channel: EpgChannel = {
       name: names[0],
       icon,
       ...(names.length > 1 ? { aliases: names.slice(1) } : {}),
     };
+    if (this.sink) this.sink.channel(id, channel);
+    else this.channels[id] = channel;
     this.stats.channelsKept++;
   }
 
@@ -322,13 +332,17 @@ export class XMLTVStreamParser {
       category,
       icon,
     };
-    const list = this.programmes[channelId] ?? (this.programmes[channelId] = []);
     const previousStart = this.lastStartByChannel.get(channelId);
     if (previousStart !== undefined && start.time < previousStart) {
       this.unsortedChannels.add(channelId);
     }
     this.lastStartByChannel.set(channelId, start.time);
-    list.push(programme);
+    if (this.sink) {
+      this.sink.programme(channelId, programme);
+    } else {
+      const list = this.programmes[channelId] ?? (this.programmes[channelId] = []);
+      list.push(programme);
+    }
     this.stats.programmesKept++;
   }
 

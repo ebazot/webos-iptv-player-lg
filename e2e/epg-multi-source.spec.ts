@@ -38,8 +38,23 @@ async function setup(page: Page): Promise<void> {
         : playlist('Bravo', 'http://host/b.m3u8'),
     });
   });
-  await page.route('**/player_api.php*', (route) =>
-    route.fulfill({ status: 200, contentType: 'application/json', body: '[]' }));
+  await page.route('**/player_api.php*', (route) => {
+    const url = new URL(route.request().url());
+    const action = url.searchParams.get('action');
+    const second = url.port === '8082';
+    const body = action === 'get_live_streams'
+      ? [{
+          stream_id: second ? 102 : 101,
+          direct_source: second ? 'http://host/c.m3u8' : 'http://host/b.m3u8',
+          tv_archive: 0,
+        }]
+      : {};
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(body),
+    });
+  });
   await page.route('**/m3u.xml', (route) =>
     route.fulfill({ status: 200, contentType: 'application/xml', body: epg('Alpha', 'Alpha Program') }));
   await page.route('**/xmltv.php*', (route) => {
