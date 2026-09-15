@@ -15,6 +15,10 @@ describe('i18n', () => {
   it('returns and interpolates English messages', () => {
     expect(t('channel.recentlyWatched')).toBe('Recently Watched');
     expect(tp('channel.count', 12)).toBe('12 channels');
+    expect(t('app.loadingChannelsProgress', {
+      processed: 1024,
+      kept: 512,
+    })).toBe('Loading channels… 1024 processed, 512 kept');
   });
 
   it('resolves supported Simplified Chinese system locales', () => {

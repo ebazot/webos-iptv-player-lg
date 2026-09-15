@@ -29,7 +29,14 @@ export interface M3UWorkerResponse {
 }
 
 export type M3UWorkerChunk =
-  | { kind: 'channels'; channels: Channel[] }
+  | {
+      kind: 'channels';
+      channels: Channel[];
+      inputBytes: number;
+      chunks: number;
+      channelsEmitted: number;
+      channelsDropped: number;
+    }
   | {
       kind: 'progress';
       inputBytes: number;

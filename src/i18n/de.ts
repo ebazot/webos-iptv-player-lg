@@ -321,6 +321,7 @@ export const DE_MESSAGES = {
   'settings.uploadRemoved': 'Hochgeladene Wiedergabeliste entfernt',
   'app.welcome': 'Willkommen! Füge zum Starten die URL einer Wiedergabeliste hinzu.',
   'app.loadingChannels': 'Sender werden geladen…',
+  'app.loadingChannelsProgress': 'Sender werden geladen… {processed} verarbeitet, {kept} behalten',
   'app.channelsLoaded': {
     one: '{count} Sender geladen',
     other: '{count} Sender geladen',

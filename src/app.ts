@@ -630,7 +630,17 @@ class App {
 
       const loadingText = $('#loading-text');
       if (loadingText) loadingText.textContent = t('app.loadingChannels');
-      await PlaylistService.load();
+      let lastProgressAt = 0;
+      await PlaylistService.load(progress => {
+        if (!loadingText) return;
+        const now = Date.now();
+        if (now - lastProgressAt < 250) return;
+        lastProgressAt = now;
+        loadingText.textContent = t('app.loadingChannelsProgress', {
+          processed: progress.channelsProcessed,
+          kept: progress.channelsKept,
+        });
+      });
       await ChannelHealthService.initialize();
       log.info('Channels loaded:', PlaylistService.channels.length,
         '| groups:', PlaylistService.groups.length,

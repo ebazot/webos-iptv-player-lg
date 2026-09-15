@@ -327,6 +327,7 @@ export const UK_MESSAGES = {
   'settings.uploadRemoved': 'Завантажений плейлист видалено',
   'app.welcome': 'Вітаємо! Додайте URL плейлиста, щоб почати.',
   'app.loadingChannels': 'Завантаження каналів…',
+  'app.loadingChannelsProgress': 'Завантаження каналів… Оброблено: {processed}, збережено: {kept}',
   'app.channelsLoaded': {
     one: 'Завантажено {count} канал',
     few: 'Завантажено {count} канали',

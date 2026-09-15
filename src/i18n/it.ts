@@ -321,6 +321,7 @@ export const IT_MESSAGES = {
   'settings.uploadRemoved': 'Playlist caricata rimossa',
   'app.welcome': 'Benvenuto! Aggiungi l’URL di una playlist per iniziare.',
   'app.loadingChannels': 'Caricamento canali…',
+  'app.loadingChannelsProgress': 'Caricamento canali… {processed} elaborati, {kept} mantenuti',
   'app.channelsLoaded': {
     one: '{count} canale caricato',
     other: '{count} canali caricati',

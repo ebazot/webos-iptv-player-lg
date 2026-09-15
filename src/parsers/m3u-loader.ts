@@ -16,6 +16,13 @@ import type { XtreamLiveReference } from '../utils/xtream-live-match';
 import type { XtreamLiveStream } from '../services/xtream-client';
 
 export type M3ULoadResult = M3UWorkerResponse;
+export interface M3ULoadProgress {
+  inputBytes: number;
+  chunks: number;
+  channelsProcessed: number;
+  channelsKept: number;
+  channelsDropped: number;
+}
 const log = createLogger('M3ULoad');
 const CHANNEL_BATCH_SIZE = 512;
 const PROGRESS_INTERVAL_BYTES = 8 * 1024 * 1024;
@@ -25,6 +32,7 @@ export async function fetchAndParseM3U(
   timeout = 30000,
   liveStreams?: XtreamLiveStream[],
   xtreamBaseUrl = '',
+  onProgress?: (progress: M3ULoadProgress) => void,
 ): Promise<M3ULoadResult> {
   const started = Date.now();
   const filter = liveStreams !== undefined
@@ -51,24 +59,32 @@ export async function fetchAndParseM3U(
     ...(xtreamBaseUrl ? { xtreamBaseUrl } : {}),
   };
   const channelBatches: Channel[] = [];
+  const handleChunk = (chunk: M3UWorkerChunk): void => {
+    if (chunk.kind === 'channels') {
+      channelBatches.push(...chunk.channels);
+    } else {
+      log.info(
+        'M3U stream load progress',
+        'event=playlist.m3u.load.progress',
+        `bytes=${String(chunk.inputBytes)}`,
+        `chunks=${String(chunk.chunks)}`,
+        `emitted=${String(chunk.channelsEmitted)}`,
+        `dropped=${String(chunk.channelsDropped)}`,
+      );
+    }
+    onProgress?.({
+      inputBytes: chunk.inputBytes,
+      chunks: chunk.chunks,
+      channelsProcessed: chunk.channelsEmitted + chunk.channelsDropped,
+      channelsKept: chunk.channelsEmitted,
+      channelsDropped: chunk.channelsDropped,
+    });
+  };
   let result: M3UWorkerResponse;
   try {
     result = typeof Worker === 'undefined'
-      ? await fetchAndParseM3UInWorker(request)
-      : await runAppWorkerTask('m3u.load', request, chunk => {
-          if (chunk.kind === 'channels') {
-            channelBatches.push(...chunk.channels);
-            return;
-          }
-          log.info(
-            'M3U stream load progress',
-            'event=playlist.m3u.load.progress',
-            `bytes=${String(chunk.inputBytes)}`,
-            `chunks=${String(chunk.chunks)}`,
-            `emitted=${String(chunk.channelsEmitted)}`,
-            `dropped=${String(chunk.channelsDropped)}`,
-          );
-        });
+      ? await fetchAndParseM3UInWorker(request, handleChunk)
+      : await runAppWorkerTask('m3u.load', request, handleChunk);
   } catch (error) {
     const details = m3uWorkerFailureDetails(error);
     log.error(
@@ -154,6 +170,9 @@ export async function fetchAndParseM3UInWorker(
   let inputBytes = 0;
   let chunks = 0;
   let nextProgressBytes = PROGRESS_INTERVAL_BYTES;
+  let reportedInputBytes = -1;
+  let reportedChannelsEmitted = -1;
+  let reportedChannelsDropped = -1;
   const options: M3UParseOptions = {
     ...(filter.accept ? { acceptChannel: filter.accept } : {}),
     ...(emitChunk
@@ -161,7 +180,16 @@ export async function fetchAndParseM3UInWorker(
           channelBatchSize: CHANNEL_BATCH_SIZE,
           onChannelBatch: (channels: Channel[]) => {
             emittedChannels += channels.length;
-            emitChunk({ kind: 'channels', channels });
+            const chunk: M3UWorkerChunk = {
+              kind: 'channels',
+              channels,
+              inputBytes,
+              chunks,
+              channelsEmitted: emittedChannels,
+              channelsDropped: filter.dropped(),
+            };
+            emitChunk(chunk);
+            rememberProgress(chunk);
           },
         }
       : {}),
@@ -210,6 +238,7 @@ export async function fetchAndParseM3UInWorker(
       stage = 'finish';
       data = parser.finish();
     }
+    emitM3UProgress(true);
     const channelsKept = data.channels.length + emittedChannels;
     return {
       data,
@@ -242,18 +271,30 @@ export async function fetchAndParseM3UInWorker(
     clearTimeout(timer);
   }
 
-  function emitM3UProgress(): void {
-    if (!emitChunk || inputBytes < nextProgressBytes) return;
-    emitChunk({
+  function emitM3UProgress(force = false): void {
+    if (!emitChunk || (!force && inputBytes < nextProgressBytes)) return;
+    const progress: M3UWorkerChunk = {
       kind: 'progress',
       inputBytes,
       chunks,
       channelsEmitted: emittedChannels,
       channelsDropped: filter.dropped(),
-    });
+    };
+    if (force
+      && progress.inputBytes === reportedInputBytes
+      && progress.channelsEmitted === reportedChannelsEmitted
+      && progress.channelsDropped === reportedChannelsDropped) return;
+    emitChunk(progress);
+    rememberProgress(progress);
     while (nextProgressBytes <= inputBytes) {
       nextProgressBytes += PROGRESS_INTERVAL_BYTES;
     }
+  }
+
+  function rememberProgress(chunk: M3UWorkerChunk): void {
+    reportedInputBytes = chunk.inputBytes;
+    reportedChannelsEmitted = chunk.channelsEmitted;
+    reportedChannelsDropped = chunk.channelsDropped;
   }
 }
 

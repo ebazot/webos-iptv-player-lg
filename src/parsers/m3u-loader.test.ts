@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fetchAndParseM3UInWorker } from './m3u-loader';
+import { fetchAndParseM3U, fetchAndParseM3UInWorker } from './m3u-loader';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -261,6 +261,65 @@ describe('fetchAndParseM3UInWorker', () => {
     expect(batches[1][0]).toBe('Channel 512');
     expect(result.data.channels).toEqual([]);
     expect(result.metrics.channelsKept).toBe(513);
+  });
+
+  it('reports processed and retained channel counts from worker batches', async () => {
+    const lines = ['#EXTM3U'];
+    for (let index = 0; index < 513; index++) {
+      lines.push(`#EXTINF:-1,Channel ${String(index)}`, `http://host/${String(index)}`);
+    }
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      streamResponse([new TextEncoder().encode(lines.join('\n'))])));
+    const progress: Array<{
+      channelsProcessed: number;
+      channelsKept: number;
+      channelsDropped: number;
+    }> = [];
+
+    await fetchAndParseM3U(
+      'http://host/list.m3u',
+      5000,
+      undefined,
+      '',
+      update => progress.push(update),
+    );
+
+    expect(progress.map(update => update.channelsProcessed)).toEqual([512, 513]);
+    expect(progress[progress.length - 1]).toMatchObject({
+      channelsKept: 513,
+      channelsDropped: 0,
+    });
+  });
+
+  it('reports the final count when every channel is filtered before 8 MiB', async () => {
+    const source = [
+      '#EXTM3U',
+      '#EXTINF:-1,Movie',
+      'http://host/movie/u/p/201.mp4',
+    ].join('\n');
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      streamResponse([new TextEncoder().encode(source)])));
+    const progress: Array<{
+      channelsProcessed: number;
+      channelsKept: number;
+      channelsDropped: number;
+    }> = [];
+
+    await fetchAndParseM3U(
+      'http://host/get.php',
+      5000,
+      [],
+      'http://host',
+      update => progress.push(update),
+    );
+
+    expect(progress).toEqual([
+      expect.objectContaining({
+        channelsProcessed: 1,
+        channelsKept: 0,
+        channelsDropped: 1,
+      }),
+    ]);
   });
 });
 

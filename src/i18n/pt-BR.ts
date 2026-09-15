@@ -321,6 +321,7 @@ export const PT_BR_MESSAGES = {
   'settings.uploadRemoved': 'Lista enviada removida',
   'app.welcome': 'Boas-vindas! Adicione a URL de uma lista para começar.',
   'app.loadingChannels': 'Carregando canais…',
+  'app.loadingChannelsProgress': 'Carregando canais… {processed} processados, {kept} mantidos',
   'app.channelsLoaded': {
     one: '{count} canal carregado',
     other: '{count} canais carregados',

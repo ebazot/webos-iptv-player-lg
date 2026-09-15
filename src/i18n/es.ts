@@ -321,6 +321,7 @@ export const ES_MESSAGES = {
   'settings.uploadRemoved': 'Lista subida eliminada',
   'app.welcome': '¡Bienvenido! Agrega la URL de una lista para comenzar.',
   'app.loadingChannels': 'Cargando canales…',
+  'app.loadingChannelsProgress': 'Cargando canales… {processed} procesados, {kept} conservados',
   'app.channelsLoaded': {
     one: '{count} canal cargado',
     other: '{count} canales cargados',

@@ -321,6 +321,7 @@ export const FR_MESSAGES = {
   'settings.uploadRemoved': 'Liste importée supprimée',
   'app.welcome': 'Bienvenue ! Ajoutez l’URL d’une liste de lecture pour commencer.',
   'app.loadingChannels': 'Chargement des chaînes…',
+  'app.loadingChannelsProgress': 'Chargement des chaînes… {processed} traitées, {kept} conservées',
   'app.channelsLoaded': {
     one: '{count} chaîne chargée',
     other: '{count} chaînes chargées',

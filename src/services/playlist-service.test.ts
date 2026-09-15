@@ -30,6 +30,13 @@ vi.mock('../parsers/m3u-loader', async (importOriginal) => {
       timeout: number,
       streams?: Array<{ streamId: string; directSource: string }>,
       baseUrl?: string,
+      onProgress?: (progress: {
+        inputBytes: number;
+        chunks: number;
+        channelsProcessed: number;
+        channelsKept: number;
+        channelsDropped: number;
+      }) => void,
     ) => {
       const text = await fetchTextMock(url, timeout);
       const { parseM3U } = await import('../parsers/m3u-parser');
@@ -37,6 +44,13 @@ vi.mock('../parsers/m3u-loader', async (importOriginal) => {
       const data = parseM3U(text, url, filter.accept
         ? { acceptChannel: filter.accept }
         : {});
+      onProgress?.({
+        inputBytes: text.length,
+        chunks: 1,
+        channelsProcessed: data.channels.length + filter.dropped(),
+        channelsKept: data.channels.length,
+        channelsDropped: filter.dropped(),
+      });
       return {
         data,
         metrics: {
@@ -110,6 +124,30 @@ describe('PlaylistService.refresh', () => {
   it('merges playlists and de-duplicates channels by URL', async () => {
     const channels = await PlaylistService.refresh();
     expect(channels.map(c => c.name)).toEqual(['Alpha', 'Bravo', 'Charlie']);
+  });
+
+  it('reports cumulative channel-loading progress across sources', async () => {
+    const progress: Parameters<typeof PlaylistService.refresh>[0] extends
+      ((value: infer Value) => void) ? Value[] : never = [];
+
+    await PlaylistService.refresh(value => progress.push(value));
+
+    expect(progress).toEqual([
+      {
+        sourceNumber: 1,
+        sourceCount: 2,
+        inputBytes: P1.length,
+        channelsProcessed: 2,
+        channelsKept: 2,
+      },
+      {
+        sourceNumber: 2,
+        sourceCount: 2,
+        inputBytes: P2.length,
+        channelsProcessed: 4,
+        channelsKept: 4,
+      },
+    ]);
   });
 
   it('loads a bare MPD playlist URL as a single DASH channel', async () => {

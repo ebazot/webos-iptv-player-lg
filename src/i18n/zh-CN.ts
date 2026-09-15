@@ -318,6 +318,7 @@ export const ZH_CN_MESSAGES = {
   'settings.uploadRemoved': '已移除上传的播放列表',
   'app.welcome': '欢迎！请添加播放列表网址以开始使用。',
   'app.loadingChannels': '正在加载频道…',
+  'app.loadingChannelsProgress': '正在加载频道… 已处理 {processed}，保留 {kept}',
   'app.channelsLoaded': {
     other: '已加载 {count} 个频道',
   },

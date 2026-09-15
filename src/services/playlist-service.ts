@@ -7,6 +7,7 @@ import {
   type PlaylistTab,
 } from '../types';
 import { fetchAndParseM3U } from '../parsers/m3u-loader';
+import type { M3ULoadProgress } from '../parsers/m3u-loader';
 import {
   xtreamPlaylistUrl,
   xtreamEpgUrl,
@@ -39,6 +40,14 @@ import { getCachedPlaylist, scheduleCachedPlaylist } from './idb-cache';
 import { isSourceEnabled } from '../utils/playlist';
 
 const log = createLogger('Playlist');
+
+export interface PlaylistLoadProgress {
+  sourceNumber: number;
+  sourceCount: number;
+  inputBytes: number;
+  channelsProcessed: number;
+  channelsKept: number;
+}
 
 function usableDirectSource(value: string): string {
   try {
@@ -140,7 +149,7 @@ class PlaylistServiceImpl {
     this.searchIndexedChannelCount = -1;
   }
 
-  async load(): Promise<Channel[]> {
+  async load(onProgress?: (progress: PlaylistLoadProgress) => void): Promise<Channel[]> {
     const enabledSources = StorageService.getPlaylists().filter(isSourceEnabled);
     const enabledIds = new Set(enabledSources.map(source => source.id));
     if (!enabledIds.size) {
@@ -178,10 +187,10 @@ class PlaylistServiceImpl {
       return this.channels;
     }
     log.info('Cache miss — refreshing from network');
-    return this.refresh();
+    return this.refresh(onProgress);
   }
 
-  async refresh(): Promise<Channel[]> {
+  async refresh(onProgress?: (progress: PlaylistLoadProgress) => void): Promise<Channel[]> {
     const done = log.time('refresh');
     const playlists = StorageService.getPlaylists().filter(isSourceEnabled);
     if (!playlists.length) {
@@ -196,6 +205,8 @@ class PlaylistServiceImpl {
     const byUrl = new Map<string, Channel>();
     const epgSources: EpgSource[] = [];
     let failedPlaylists = 0;
+    let completedProcessed = 0;
+    let completedKept = 0;
     const addEpgSource = (url: string, playlistId: string, kind: EpgSource['kind']): void => {
       const existing = epgSources.find((source) => source.url === url);
       if (existing) {
@@ -211,6 +222,8 @@ class PlaylistServiceImpl {
       const source = pl.source === 'xtream' ? 'xtream' : 'm3u';
       const sourceStarted = Date.now();
       const sourceEpgStart = epgSources.length;
+      let sourceProcessed = 0;
+      let sourceKept = 0;
       log.info(
         'Playlist source load started',
         'event=playlist.source.load.started',
@@ -271,6 +284,17 @@ class PlaylistServiceImpl {
             60000,
             xtreamCatalogAvailable ? xtreamStreams : undefined,
             xtreamCredentials?.baseUrl,
+            (progress: M3ULoadProgress) => {
+              sourceProcessed = Math.max(sourceProcessed, progress.channelsProcessed);
+              sourceKept = Math.max(sourceKept, progress.channelsKept);
+              onProgress?.({
+                sourceNumber: load,
+                sourceCount: playlists.length,
+                inputBytes: progress.inputBytes,
+                channelsProcessed: completedProcessed + sourceProcessed,
+                channelsKept: completedKept + sourceKept,
+              });
+            },
           );
           parsed = loaded.data;
         } catch (err) {
@@ -404,6 +428,8 @@ class PlaylistServiceImpl {
           log.error(`Failed to load playlist '${pl.name || pl.url}':`, err);
         }
       }
+      completedProcessed += sourceProcessed;
+      completedKept += sourceKept;
       plDone();
     }
 
