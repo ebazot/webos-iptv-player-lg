@@ -17,8 +17,8 @@ npm run benchmark:update   # run and intentionally replace the baseline
 
 The default run uses four-times CPU throttling to make main-thread regressions
 more visible on a development computer. The large-playlist memory phase runs
-without CPU throttling so its desktop and TV results remain comparable. The
-values can be overridden:
+without CPU throttling and is compared only with the matching desktop or TV
+baseline. The values can be overridden:
 
 ```bash
 BENCHMARK_SCALE=50000 \
@@ -113,6 +113,9 @@ channel, program, and no-match shapes without catalog ranking.
 
 `benchmarks/baseline.json` is the checked-in reference. `benchmark:check`
 compares repeated distributions and fails when any is more than 15% slower.
+Baselines are longitudinal regression references for repeated runs in the same
+environment, not benchmarks for comparing or ranking different computers or
+TV models.
 Single-sample startup-ready and view-load timings remain informational because
 they are sensitive to IndexedDB and host scheduling. The isolated production
 derived-index benchmark is regression-gated because it captures deterministic
@@ -147,8 +150,8 @@ npm run benchmark:tv:update
 npm run benchmark:tv:check
 ```
 
-The TV runner connects directly to the running app's page through the CDP
-endpoint used by `scripts/tv.sh`. It does not use Playwright or desktop CPU
+The TV runner connects to the running app's page over CDP using the same
+connection flow as `scripts/tv.sh`. It does not use Playwright or desktop CPU
 throttling. Results are written to
 `test-output/benchmarks/tv-latest.json`, and the independent checked-in
 reference is `benchmarks/tv-baseline.json`.
@@ -168,6 +171,29 @@ The servers close automatically after their measurements. Timing also records
 the largest animation-frame gap. During memory passes, one persistent SSH
 session samples renderer RSS; this avoids per-sample SSH connection overhead
 and reports RSS peak, average, and delta alongside the CDP heap metrics.
+
+### WSL 2 NAT
+
+Default WSL 2 networking uses NAT and a virtual Ethernet adapter, so services
+inside WSL are not directly exposed to devices on the LAN. Advertise the
+Windows host's LAN address and choose a fixed port for the two temporary
+servers, which run sequentially:
+
+```bash
+BENCHMARK_SERVER_HOST=192.0.2.10 \
+BENCHMARK_SERVER_PORT=18080 \
+npm run benchmark:tv
+```
+
+Configure a Windows `portproxy` rule that forwards the port to the current WSL
+address, and allow the inbound TCP port through Windows Firewall. The host
+override changes only the URLs sent to the TV; the servers still listen inside
+WSL. Windows 11 mirrored networking can avoid the NAT forwarding setup when it
+is available and permitted by the local network policy.
+
+Without these variables, the runner keeps its original behavior: it derives the
+advertised address from the route to the TV, listens on all interfaces for TV
+runs, and lets the operating system choose ephemeral ports.
 
 CDP page-heap readings do not include the worker's transient parse heap. The
 streaming report marks this explicitly and includes only the cloned result once

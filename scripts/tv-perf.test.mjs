@@ -58,6 +58,18 @@ const createDeferred = () => {
   return { promise, resolve, reject };
 };
 
+const createFailingInspectorSpawn = () => {
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.killed = false;
+  child.kill = () => {
+    child.killed = true;
+  };
+  queueMicrotask(() => child.emit('exit', 1));
+  return child;
+};
+
 class FakeOutput {
   constructor({ isTTY = false, failMessage = null } = {}) {
     this.isTTY = isTTY;
@@ -655,12 +667,14 @@ describe('main discovery diagnostics', () => {
     ], {
       stdout,
       stderr,
+      spawn: createFailingInspectorSpawn,
       fetchImpl: async () => {
         throw new TypeError('fetch failed');
       },
     });
 
     expect(exitCode).toBe(1);
+    expect(stderr.chunks.join('')).toContain('Automatic ares-inspect fallback failed');
     expect(stderr.chunks.join('')).toContain(
       'CDP discovery failed at http://127.0.0.1:9222/json/list: fetch failed',
     );
@@ -685,6 +699,7 @@ describe('main discovery diagnostics', () => {
     ], {
       stdout,
       stderr,
+      spawn: createFailingInspectorSpawn,
       fetchImpl: async () => {
         throw new TypeError('fetch failed', {
           cause: Object.assign(new Error(reason), { code }),
@@ -711,6 +726,7 @@ describe('main discovery diagnostics', () => {
     ], {
       stdout,
       stderr,
+      spawn: createFailingInspectorSpawn,
       fetchImpl: async () => ({
         ok: false,
         status: 503,
@@ -733,6 +749,7 @@ describe('main discovery diagnostics', () => {
     ], {
       stdout,
       stderr,
+      spawn: createFailingInspectorSpawn,
       resolveDeviceIp: () => '192.0.2.55',
       fetchImpl: async (url) => {
         requested.push(url);
@@ -776,6 +793,7 @@ describe('main discovery diagnostics', () => {
     ], {
       stdout,
       stderr,
+      spawn: createFailingInspectorSpawn,
       fetchImpl: async () => ({
         ok: true,
         json: async () => [],
@@ -926,11 +944,15 @@ describe('parsePerformanceArgs', () => {
       intervalMs: 1000,
       durationMs: null,
       mode: 'monitor',
+      appId: 'com.lennylxx.iptv',
+      target: 'com.lennylxx.iptv',
+      targetSelection: 'legacy-tv-app',
     });
   });
 
   it('maps --app to a legacy-tv-app target selection', () => {
     expect(parsePerformanceArgs(['--app', 'com.example.app'])).toMatchObject({
+      appId: 'com.example.app',
       target: 'com.example.app',
       targetSelection: 'legacy-tv-app',
     });
@@ -950,6 +972,7 @@ describe('parsePerformanceArgs', () => {
     ])).toMatchObject({
       url: 'http://host/a',
       target: 'Alpha',
+      targetSelection: 'strict',
       intervalMs: 250,
       durationMs: 2000,
       jsonlPath: 'samples.jsonl',

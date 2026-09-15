@@ -1,7 +1,9 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn as spawnChild } from 'node:child_process';
 
 const CONNECTION_CLOSED_ERROR = 'CDP connection closed';
 const NO_PAGE_TARGET_PATTERN = /^No page target matched "([^"]+)"/;
+const AMBIGUOUS_PAGE_TARGET_PATTERN = /^Ambiguous page target "/;
+const CDP_UNAVAILABLE = 'CDP_UNAVAILABLE';
 const NETWORK_ERROR_DETAILS = new Map([
   ['ECONNREFUSED', {
     reason: 'connection refused',
@@ -77,29 +79,51 @@ const findNetworkErrorCode = (error) => {
   return [...NETWORK_ERROR_DETAILS.keys()].find((code) => message.includes(code)) ?? null;
 };
 
+const unavailableError = (message, cause) => {
+  const error = new Error(message, cause === undefined ? undefined : { cause });
+  error.code = CDP_UNAVAILABLE;
+  return error;
+};
+
+export function isCdpFallbackEligible(error) {
+  return error?.code === CDP_UNAVAILABLE;
+}
+
 export function normalizeCdpConnectionError(error, { endpoint, phase }) {
   const message = toErrorMessage(error, String(error));
+  if (AMBIGUOUS_PAGE_TARGET_PATTERN.test(message)) {
+    return error instanceof Error ? error : new Error(message);
+  }
   const noPageTargetMatch = message.match(NO_PAGE_TARGET_PATTERN);
   if (noPageTargetMatch) {
-    return new Error(
+    return unavailableError(
       `app target "${noPageTargetMatch[1]}" is not open or inspectable. ${message}`,
+      error,
     );
   }
   if (message === 'No inspectable page targets available.') {
-    return new Error(
+    return unavailableError(
       'CDP endpoint is reachable, but no inspectable app page is open. Open the app on the TV and retry.',
+      error,
     );
   }
 
   const networkCode = findNetworkErrorCode(error);
   if (networkCode) {
     const detail = NETWORK_ERROR_DETAILS.get(networkCode);
-    return new Error(`${phase} failed at ${endpoint}: ${detail.reason}. ${detail.hint}`);
+    return unavailableError(
+      `${phase} failed at ${endpoint}: ${detail.reason}. ${detail.hint}`,
+      error,
+    );
   }
   if (message === 'fetch failed' || message === 'CDP connection failed') {
-    return new Error(
+    return unavailableError(
       `${phase} failed at ${endpoint}: ${message}. Check that the TV is on, reachable, and the app is open.`,
+      error,
     );
+  }
+  if (phase === 'CDP WebSocket connection') {
+    return unavailableError(message, error);
   }
   return error instanceof Error ? error : new Error(message);
 }
@@ -173,27 +197,6 @@ export function selectPageTarget(
   );
 }
 
-export async function resolveCdpWebSocketUrl({
-  url,
-  host = '127.0.0.1',
-  port = 9222,
-  target,
-  fallbackToFirst = false,
-  targetSelection = 'strict',
-  fetchImpl = globalThis.fetch?.bind(globalThis),
-} = {}) {
-  const resolved = await resolveCdpTarget({
-    url,
-    host,
-    port,
-    target,
-    fallbackToFirst,
-    targetSelection,
-    fetchImpl,
-  });
-  return resolved.wsUrl;
-}
-
 export async function resolveCdpTarget({
   url,
   host = '127.0.0.1',
@@ -224,14 +227,14 @@ export async function resolveCdpTarget({
     });
   }
   if (!response.ok) {
-    throw new Error(`CDP target discovery failed: ${response.status}`);
+    throw unavailableError(`CDP target discovery failed: ${response.status}`);
   }
 
   let targets;
   try {
     targets = await response.json();
   } catch {
-    throw new Error('CDP target discovery failed: invalid JSON');
+    throw unavailableError('CDP target discovery failed: invalid JSON');
   }
 
   let selected;
@@ -244,7 +247,9 @@ export async function resolveCdpTarget({
     });
   }
   const wsUrl = selected?.webSocketDebuggerUrl;
-  if (!wsUrl) throw new Error('Selected page target does not expose a WebSocket debugger URL.');
+  if (!wsUrl) {
+    throw unavailableError('Selected page target does not expose a WebSocket debugger URL.');
+  }
 
   const socketUrl = new URL(wsUrl);
   if (socketUrl.hostname === 'localhost' || socketUrl.hostname === '127.0.0.1') {
@@ -254,6 +259,146 @@ export async function resolveCdpTarget({
     target: selected,
     wsUrl: socketUrl.toString(),
   };
+}
+
+export function inspectorWebSocketUrl(output) {
+  const match = String(output).match(
+    /(https?):\/\/[^\s]+\/devtools\/inspector\.html\?ws=([^\s&]+)/,
+  );
+  if (!match) return null;
+  const wsTarget = decodeURIComponent(match[2]);
+  return `${match[1] === 'https' ? 'wss' : 'ws'}://${wsTarget}`;
+}
+
+export function startAresInspector(
+  appId,
+  device,
+  {
+    spawn = spawnChild,
+    timeoutMs = 30000,
+    processSource = process,
+  } = {},
+) {
+  const deviceArgs = device ? ['-d', device] : [];
+  const child = spawn('ares-inspect', ['-a', appId, ...deviceArgs], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let output = '';
+  let exited = false;
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    processSource?.off?.('exit', close);
+    if (!exited && !child.killed) child.kill();
+  };
+  processSource?.once?.('exit', close);
+
+  const wsUrl = new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      callback(value);
+    };
+    const timer = setTimeout(() => {
+      close();
+      finish(reject, new Error('Timed out waiting for ares-inspect to publish a target'));
+    }, timeoutMs);
+    const onData = (chunk) => {
+      output += String(chunk);
+      const parsed = inspectorWebSocketUrl(output);
+      if (parsed) finish(resolve, parsed);
+    };
+    child.stdout?.on('data', onData);
+    child.stderr?.on('data', onData);
+    child.once('error', (error) => {
+      exited = true;
+      finish(reject, error);
+    });
+    child.once('exit', (code) => {
+      exited = true;
+      if (!inspectorWebSocketUrl(output)) {
+        finish(
+          reject,
+          new Error(`ares-inspect exited before publishing a target (${String(code)})`),
+        );
+      }
+    });
+  });
+  return { child, wsUrl, close };
+}
+
+export async function connectCdpWithAresFallback({
+  appId,
+  device,
+  inspectorTimeoutMs = 30000,
+  spawn,
+  processSource = process,
+  WebSocketImpl,
+  ...targetOptions
+} = {}) {
+  let directError;
+  try {
+    const resolved = await resolveCdpTarget(targetOptions);
+    const client = await CdpClient.connect(resolved.wsUrl, { WebSocketImpl });
+    return {
+      client,
+      target: resolved.target,
+      wsUrl: resolved.wsUrl,
+      inspector: null,
+      close: () => client.close(),
+    };
+  } catch (error) {
+    if (!isCdpFallbackEligible(error)) throw error;
+    directError = error;
+  }
+
+  let inspector;
+  let closeActive = () => {};
+  const onSignal = () => closeActive();
+  processSource?.on?.('SIGINT', onSignal);
+  processSource?.on?.('SIGTERM', onSignal);
+  const detachSignals = () => {
+    processSource?.off?.('SIGINT', onSignal);
+    processSource?.off?.('SIGTERM', onSignal);
+  };
+  try {
+    inspector = startAresInspector(appId, device, {
+      spawn,
+      timeoutMs: inspectorTimeoutMs,
+      processSource,
+    });
+    closeActive = () => inspector.close();
+    const wsUrl = await inspector.wsUrl;
+    const client = await CdpClient.connect(wsUrl, { WebSocketImpl });
+    detachSignals();
+    let closed = false;
+    const connection = {
+      client,
+      target: null,
+      wsUrl,
+      inspector,
+      close() {
+        if (closed) return;
+        closed = true;
+        client.close();
+        inspector.close();
+      },
+    };
+    closeActive = () => connection.close();
+    return connection;
+  } catch (error) {
+    detachSignals();
+    inspector?.close();
+    throw new Error(
+      `Automatic ares-inspect fallback failed after direct CDP was unavailable: `
+      + `${toErrorMessage(error, String(error))}. Direct CDP error: `
+      + toErrorMessage(directError, String(directError)),
+      { cause: error },
+    );
+  }
 }
 
 export class CdpClient {

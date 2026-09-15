@@ -6,7 +6,9 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import {
   CdpClient,
+  inspectorWebSocketUrl,
   resolveCdpTarget,
+  startAresInspector,
 } from './cdp-client.mjs';
 import {
   enableCdpLogs,
@@ -1020,47 +1022,7 @@ export const snapshotProbeExpression = `(${function snapshotProbe() {
   };
 }.toString()})()`;
 
-export function inspectorWebSocketUrl(output) {
-  const match = String(output).match(/https?:\/\/[^\s]+\/devtools\/inspector\.html\?ws=([^\s&]+)/);
-  if (!match) return null;
-  const wsTarget = decodeURIComponent(match[1]);
-  return `ws://${wsTarget}`;
-}
-
-export function startAresInspector(
-  appId,
-  device,
-  { spawn = spawnChild, timeoutMs = DEFAULT_TIMEOUT_MS } = {},
-) {
-  const deviceArgs = device ? ['-d', device] : [];
-  const child = spawn('ares-inspect', ['-a', appId, ...deviceArgs], {
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  let output = '';
-  const wsUrl = new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error('Timed out waiting for ares-inspect'));
-    }, timeoutMs);
-    const finish = (callback, value) => {
-      clearTimeout(timer);
-      callback(value);
-    };
-    const onData = (chunk) => {
-      output += String(chunk);
-      const parsed = inspectorWebSocketUrl(output);
-      if (parsed) finish(resolve, parsed);
-    };
-    child.stdout?.on('data', onData);
-    child.stderr?.on('data', onData);
-    child.once('error', (error) => finish(reject, error));
-    child.once('exit', (code) => {
-      if (!inspectorWebSocketUrl(output)) {
-        finish(reject, new Error(`ares-inspect exited before publishing a target (${String(code)})`));
-      }
-    });
-  });
-  return { child, wsUrl };
-}
+export { inspectorWebSocketUrl, startAresInspector };
 
 const shellQuote = (value) => `'${String(value).replace(/'/g, `'\"'\"'`)}'`;
 
@@ -1723,7 +1685,7 @@ export async function captureDiagnostics(options, overrides = {}) {
     }
     client = await dependencies.connect(target.wsUrl);
   } catch (error) {
-    if (inspector?.child && !inspector.child.killed) inspector.child.kill();
+    inspector?.close();
     throw error;
   }
   const logs = [];
@@ -1843,7 +1805,7 @@ export async function captureDiagnostics(options, overrides = {}) {
     if (nativeMetricSession?.child && !nativeMetricSession.child.killed) {
       nativeMetricSession.child.kill();
     }
-    if (inspector?.child && !inspector.child.killed) inspector.child.kill();
+    inspector?.close();
   }
 }
 

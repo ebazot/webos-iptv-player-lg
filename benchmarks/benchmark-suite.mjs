@@ -1107,10 +1107,14 @@ async function resolveLocalAddress(deviceIp) {
   }
 }
 
+function formatUrlHost(host) {
+  return host.includes(':') ? `[${host}]` : host;
+}
+
 async function startXMLTVBenchmarkServer(deviceIp, body, options = {}) {
   const chunkBytes = options.chunkBytes ?? 16 * 1024;
   const chunkDelayMs = options.chunkDelayMs ?? 1;
-  const host = await resolveLocalAddress(deviceIp);
+  const host = options.advertisedHost ?? await resolveLocalAddress(deviceIp);
   const server = createServer(async (request, response) => {
     if (request.url !== '/benchmark-guide.xml.gz') {
       response.writeHead(404).end();
@@ -1133,7 +1137,7 @@ async function startXMLTVBenchmarkServer(deviceIp, body, options = {}) {
     }
     response.end();
   });
-  server.listen(0, '0.0.0.0');
+  server.listen(options.port ?? 0, '0.0.0.0');
   await once(server, 'listening');
   const address = server.address();
   if (!address || typeof address === 'string') {
@@ -1141,7 +1145,7 @@ async function startXMLTVBenchmarkServer(deviceIp, body, options = {}) {
     throw new Error('XMLTV benchmark server did not bind to a TCP port');
   }
   return {
-    url: `http://${host}:${String(address.port)}/benchmark-guide.xml.gz`,
+    url: `http://${formatUrlHost(host)}:${String(address.port)}/benchmark-guide.xml.gz`,
     close: async () => {
       server.close();
       await once(server, 'close');
@@ -1345,9 +1349,9 @@ export async function measureLargePlaylistMemory(options, io) {
 }
 
 export async function startLargePlaylistBenchmarkServer(options) {
-  const publicHost = options.deviceIp
-    ? await resolveLocalAddress(options.deviceIp)
-    : '127.0.0.1';
+  const publicHost = options.advertisedHost ?? (
+    options.deviceIp ? await resolveLocalAddress(options.deviceIp) : '127.0.0.1'
+  );
   const bindHost = options.deviceIp ? '0.0.0.0' : '127.0.0.1';
   const stats = {
     catalogBytes: 0,
@@ -1400,14 +1404,14 @@ export async function startLargePlaylistBenchmarkServer(options) {
     }
     response.writeHead(404).end('Not found');
   });
-  server.listen(0, bindHost);
+  server.listen(options.port ?? 0, bindHost);
   await once(server, 'listening');
   const address = server.address();
   if (!address || typeof address === 'string') {
     server.close();
     throw new Error('Large playlist server did not bind to a TCP port');
   }
-  origin = `http://${publicHost}:${String(address.port)}`;
+  origin = `http://${formatUrlHost(publicHost)}:${String(address.port)}`;
   return {
     origin,
     stats,

@@ -15,24 +15,32 @@
 //   scripts/tv.sh eval --app <id> 'JSON.stringify(<expression>)'
 import { readFileSync } from 'node:fs';
 import {
-  CdpClient,
-  resolveCdpWebSocketUrl,
+  connectCdpWithAresFallback,
   resolveConfiguredDeviceIp,
 } from './cdp-client.mjs';
 
+const DEFAULT_APP_ID = 'com.lennylxx.iptv';
+const DEFAULT_PORT = 9998;
+
 const args = process.argv.slice(2);
-const opt = (name, def) => {
+const option = (name, fallback) => {
   const i = args.indexOf(name);
-  return i >= 0 && i + 1 < args.length ? args[i + 1] : def;
+  return i >= 0 && i + 1 < args.length ? args[i + 1] : fallback;
 };
-const appFilter = opt('--app', '');
-const port = opt('--port', '9998');
-const file = opt('--file', opt('-f', ''));
+const appId = option('--app', DEFAULT_APP_ID);
+const port = Number(option('--port', String(DEFAULT_PORT)));
+const file = option('--file', option('-f', ''));
 const toErrorMessage = (value) => {
   if (value instanceof Error && value.message) return value.message;
   if (typeof value?.message === 'string' && value.message) return value.message;
   return String(value);
 };
+
+if (!Number.isInteger(port) || port < 1 || port > 65535) {
+  console.error('tv-eval: --port must be an integer from 1 to 65535');
+  process.exit(2);
+}
+
 // Everything that isn't a recognized flag (or a flag's value) is the expression.
 const flags = new Set(['--app', '--port', '--file', '-f']);
 const positional = args
@@ -52,7 +60,8 @@ try {
 }
 if (!expression.trim()) {
   console.error('tv-eval: no expression given.\n'
-    + 'Usage: tv-eval.mjs [--app <id>] [--port 9998] (\'<expression>\' | --file <path.js> | -)');
+    + `Usage: tv-eval.mjs [--app <id>] [--port ${String(DEFAULT_PORT)}] `
+    + '(\'<expression>\' | --file <path.js> | -)');
   process.exit(2);
 }
 
@@ -65,16 +74,18 @@ try {
   process.exit(1);
 }
 
-let client;
+let connection;
 let exitCode = 0;
 try {
-  const wsUrl = await resolveCdpWebSocketUrl({
+  connection = await connectCdpWithAresFallback({
+    appId,
+    device: process.env.TV_DEVICE,
     host: ip,
     port,
-    target: appFilter,
+    target: appId,
     targetSelection: 'legacy-tv-app',
   });
-  client = await CdpClient.connect(wsUrl);
+  const { client } = connection;
 
   // awaitPromise resolves an async expression; returnByValue ships the result
   // back as JSON rather than a remote handle.
@@ -98,6 +109,6 @@ try {
   console.error(`tv-eval: ${toErrorMessage(e)}`);
   exitCode = 1;
 } finally {
-  client?.close();
+  connection?.close();
 }
 process.exit(exitCode);

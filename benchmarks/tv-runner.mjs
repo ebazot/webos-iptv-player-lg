@@ -9,8 +9,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import {
-  CdpClient,
-  resolveCdpWebSocketUrl,
+  connectCdpWithAresFallback,
   resolveConfiguredDeviceIp,
 } from '../scripts/cdp-client.mjs';
 import {
@@ -68,6 +67,9 @@ const LARGE_PLAYLIST = {
   accountId: 'benchmark-large-playlist',
 };
 const PORT = Number(process.env.TV_CDP_PORT ?? '9998');
+const SERVER_HOST = process.env.BENCHMARK_SERVER_HOST;
+const SERVER_PORT_VALUE = process.env.BENCHMARK_SERVER_PORT;
+const SERVER_PORT = SERVER_PORT_VALUE === undefined ? undefined : Number(SERVER_PORT_VALUE);
 const cleanupOnly = process.argv.includes('--cleanup');
 
 for (const [name, value] of [
@@ -91,16 +93,40 @@ if (!Number.isInteger(LARGE_PLAYLIST.chunkDelayMs)
     || LARGE_PLAYLIST.chunkDelayMs < 0) {
   throw new Error('BENCHMARK_LARGE_PLAYLIST_CHUNK_DELAY_MS must be a non-negative integer');
 }
+if (SERVER_PORT_VALUE !== undefined
+    && (!/^\d+$/.test(SERVER_PORT_VALUE)
+      || !Number.isInteger(SERVER_PORT)
+      || SERVER_PORT < 1
+      || SERVER_PORT > 65535)) {
+  throw new Error('BENCHMARK_SERVER_PORT must be an integer from 1 to 65535');
+}
+if (SERVER_HOST !== undefined) {
+  let valid = SERVER_HOST.length > 0 && SERVER_HOST.trim() === SERVER_HOST;
+  try {
+    const url = new URL(`http://${SERVER_HOST}`);
+    valid = valid
+      && url.pathname === '/'
+      && url.search === ''
+      && url.hash === ''
+      && url.port === '';
+  } catch {
+    valid = false;
+  }
+  if (!valid) {
+    throw new Error('BENCHMARK_SERVER_HOST must be a hostname or IP address');
+  }
+}
 
 async function connect() {
   const ip = resolveConfiguredDeviceIp();
-  const wsUrl = await resolveCdpWebSocketUrl({
+  return connectCdpWithAresFallback({
+    appId: APP_ID,
+    device: process.env.TV_DEVICE,
     host: ip,
     port: PORT,
     target: APP_ID,
     targetSelection: 'legacy-tv-app',
   });
-  return CdpClient.connect(wsUrl);
 }
 
 async function evaluate(client, fn, argument) {
@@ -352,6 +378,8 @@ async function runLargePlaylistMemory(client) {
   const server = await startLargePlaylistBenchmarkServer({
     ...LARGE_PLAYLIST,
     deviceIp: resolveConfiguredDeviceIp(),
+    advertisedHost: SERVER_HOST,
+    port: SERVER_PORT,
   });
   try {
     await evaluate(client, installLargePlaylistSource, {
@@ -462,13 +490,22 @@ async function runLargePlaylistMemory(client) {
 }
 
 async function runTvBenchmark() {
-  let client = await connect();
+  const connection = await connect();
+  const { client } = connection;
+  const onSignal = () => connection.close();
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
   if (cleanupOnly) {
-    const cleanup = await cleanupFixture(client);
-    await reloadApp(client, ['#view-channels', '#view-settings']);
-    console.log(JSON.stringify(cleanup, null, 2));
-    client.close();
-    return;
+    try {
+      const cleanup = await cleanupFixture(client);
+      await reloadApp(client, ['#view-channels', '#view-settings']);
+      console.log(JSON.stringify(cleanup, null, 2));
+      return;
+    } finally {
+      process.off('SIGINT', onSignal);
+      process.off('SIGTERM', onSignal);
+      connection.close();
+    }
   }
   let fixtureAttempted = false;
   try {
@@ -528,6 +565,8 @@ async function runTvBenchmark() {
       scale: SCALE,
       deviceIp: resolveConfiguredDeviceIp(),
       appId: APP_ID,
+      advertisedHost: SERVER_HOST,
+      port: SERVER_PORT,
     }, {
       evaluate: (fn, arg) => evaluate(client, fn, arg),
       collectGarbage: () => client.call('HeapProfiler.collectGarbage'),
@@ -625,7 +664,9 @@ async function runTvBenchmark() {
         process.exitCode = 1;
       }
     }
-    client.close();
+    process.off('SIGINT', onSignal);
+    process.off('SIGTERM', onSignal);
+    connection.close();
   }
 }
 

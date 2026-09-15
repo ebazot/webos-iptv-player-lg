@@ -1,12 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { EventEmitter } from 'node:events';
 import {
   CdpClient,
+  connectCdpWithAresFallback,
+  isCdpFallbackEligible,
   normalizeDeviceConfigurationError,
   resolveCdpTarget,
-  resolveCdpWebSocketUrl,
   resolveConfiguredDeviceIp,
   selectPageTarget,
+  startAresInspector,
 } from './cdp-client.mjs';
+
+const resolveWsUrl = async options => (await resolveCdpTarget(options)).wsUrl;
 
 const pages = [
   {
@@ -100,6 +105,17 @@ class FakeWebSocket {
     for (const listener of this.listeners.get(type) ?? []) listener(event);
   }
 }
+
+const createInspectorChild = () => {
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.killed = false;
+  child.kill = vi.fn(() => {
+    child.killed = true;
+  });
+  return child;
+};
 
 describe('resolveConfiguredDeviceIp', () => {
   const originalTVDevice = process.env.TV_DEVICE;
@@ -233,7 +249,7 @@ describe('selectPageTarget', () => {
   });
 });
 
-describe('resolveCdpWebSocketUrl', () => {
+describe('resolveCdpTarget', () => {
   it('exposes the selected target alongside the rewritten websocket URL', async () => {
     const fetchImpl = vi.fn(async () => ({
       ok: true,
@@ -282,7 +298,7 @@ describe('resolveCdpWebSocketUrl', () => {
       json: async () => pages,
     }));
 
-    await expect(resolveCdpWebSocketUrl({
+    await expect(resolveWsUrl({
       host: '192.0.2.1',
       port: 9998,
       target: 'Alpha',
@@ -297,7 +313,7 @@ describe('resolveCdpWebSocketUrl', () => {
       json: async () => pages,
     }));
 
-    await expect(resolveCdpWebSocketUrl({
+    await expect(resolveWsUrl({
       target: 'Alpha',
       fetchImpl,
     })).resolves.toBe('ws://127.0.0.1:9222/devtools/page/page-a');
@@ -310,7 +326,7 @@ describe('resolveCdpWebSocketUrl', () => {
       json: async () => pages,
     }));
 
-    await expect(resolveCdpWebSocketUrl({
+    await expect(resolveWsUrl({
       host: '192.0.2.1',
       target: 'Alpha',
       fetchImpl,
@@ -324,7 +340,7 @@ describe('resolveCdpWebSocketUrl', () => {
       json: async () => pages,
     }));
 
-    await expect(resolveCdpWebSocketUrl({
+    await expect(resolveWsUrl({
       host: '192.0.2.1',
       port: 9998,
       target: 'missing',
@@ -357,7 +373,7 @@ describe('resolveCdpWebSocketUrl', () => {
       ],
     }));
 
-    await expect(resolveCdpWebSocketUrl({
+    await expect(resolveWsUrl({
       host: '192.0.2.1',
       port: 9998,
       target: 'com.example.alpha',
@@ -374,7 +390,7 @@ describe('resolveCdpWebSocketUrl', () => {
       },
     }));
 
-    await expect(resolveCdpWebSocketUrl({
+    await expect(resolveWsUrl({
       host: '192.0.2.1',
       port: 9998,
       target: 'Alpha',
@@ -389,7 +405,7 @@ describe('resolveCdpWebSocketUrl', () => {
       });
     });
 
-    await expect(resolveCdpWebSocketUrl({
+    await expect(resolveWsUrl({
       host: '192.0.2.1',
       port: 9998,
       fetchImpl,
@@ -399,7 +415,7 @@ describe('resolveCdpWebSocketUrl', () => {
   });
 
   it('reports when discovery succeeds but no app page is open', async () => {
-    await expect(resolveCdpWebSocketUrl({
+    await expect(resolveWsUrl({
       host: '192.0.2.1',
       port: 9998,
       fetchImpl: async () => ({
@@ -410,9 +426,156 @@ describe('resolveCdpWebSocketUrl', () => {
   });
 
   it('accepts direct WebSocket URLs without discovery', async () => {
-    await expect(resolveCdpWebSocketUrl({
+    await expect(resolveWsUrl({
       url: 'wss://192.0.2.1:9222/devtools/page/page-a',
     })).resolves.toBe('wss://192.0.2.1:9222/devtools/page/page-a');
+  });
+});
+
+describe('automatic ares-inspect fallback', () => {
+  afterEach(() => {
+    FakeWebSocket.reset();
+    vi.useRealTimers();
+  });
+
+  it('keeps the direct discovery and connection fast path child-free', async () => {
+    const spawn = vi.fn();
+    const connection = await connectCdpWithAresFallback({
+      appId: 'com.example.app',
+      host: '192.0.2.1',
+      port: 9998,
+      target: 'Alpha',
+      fetchImpl: async () => ({
+        ok: true,
+        json: async () => pages,
+      }),
+      WebSocketImpl: FakeWebSocket,
+      spawn,
+    });
+
+    expect(connection.wsUrl).toBe('ws://192.0.2.1:9222/devtools/page/page-a');
+    expect(connection.inspector).toBeNull();
+    expect(spawn).not.toHaveBeenCalled();
+    connection.close();
+  });
+
+  it('uses the inspector-published forwarded URL and cleans up its exact child', async () => {
+    const child = createInspectorChild();
+    const processSource = new EventEmitter();
+    const spawn = vi.fn(() => child);
+    FakeWebSocket.behavior = {
+      onConstruct(socket) {
+        if (socket.url.includes('192.0.2.1')) {
+          socket.failOpen('CDP connection failed');
+        }
+      },
+    };
+    const connectionPromise = connectCdpWithAresFallback({
+      appId: 'com.example.app',
+      device: 'tv-a',
+      host: '192.0.2.1',
+      port: 9998,
+      target: 'Alpha',
+      fetchImpl: async () => ({
+        ok: true,
+        json: async () => pages,
+      }),
+      WebSocketImpl: FakeWebSocket,
+      spawn,
+      processSource,
+    });
+    await vi.waitFor(() => {
+      expect(spawn).toHaveBeenCalledTimes(1);
+    });
+    child.stdout.emit(
+      'data',
+      'Application Debugging - http://localhost:62090/devtools/inspector.html'
+      + '?ws=localhost:62090/devtools/page/ABC',
+    );
+
+    const connection = await connectionPromise;
+    expect(connection.wsUrl).toBe('ws://localhost:62090/devtools/page/ABC');
+    expect(FakeWebSocket.instances[1].url).toBe(
+      'ws://localhost:62090/devtools/page/ABC',
+    );
+    expect(spawn).toHaveBeenCalledWith(
+      'ares-inspect',
+      ['-a', 'com.example.app', '-d', 'tv-a'],
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    expect(child.kill).not.toHaveBeenCalled();
+
+    connection.close();
+    connection.close();
+    expect(child.kill).toHaveBeenCalledTimes(1);
+    expect(FakeWebSocket.instances[1].readyState).toBe(3);
+  });
+
+  it('does not fall back for ambiguous semantic target selection', async () => {
+    const spawn = vi.fn();
+    await expect(connectCdpWithAresFallback({
+      appId: 'com.example.app',
+      host: '192.0.2.1',
+      port: 9998,
+      target: 'http://host/',
+      fetchImpl: async () => ({
+        ok: true,
+        json: async () => pages,
+      }),
+      WebSocketImpl: FakeWebSocket,
+      spawn,
+    })).rejects.toThrow(/Ambiguous page target/);
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it('reports inspector early exit and kills a timed-out inspector', async () => {
+    const earlyChild = createInspectorChild();
+    const early = startAresInspector('com.example.app', '', {
+      spawn: () => earlyChild,
+      timeoutMs: 1000,
+      processSource: new EventEmitter(),
+    });
+    earlyChild.emit('exit', 2);
+    await expect(early.wsUrl).rejects.toThrow(
+      'ares-inspect exited before publishing a target (2)',
+    );
+    expect(earlyChild.kill).not.toHaveBeenCalled();
+
+    vi.useFakeTimers();
+    const timedOutChild = createInspectorChild();
+    const timedOut = startAresInspector('com.example.app', '', {
+      spawn: () => timedOutChild,
+      timeoutMs: 1000,
+      processSource: new EventEmitter(),
+    });
+    const rejection = expect(timedOut.wsUrl).rejects.toThrow(
+      'Timed out waiting for ares-inspect to publish a target',
+    );
+    await vi.advanceTimersByTimeAsync(1000);
+    await rejection;
+    expect(timedOutChild.kill).toHaveBeenCalledTimes(1);
+  });
+
+  it('marks only endpoint and target availability failures as fallback eligible', async () => {
+    const unavailable = await resolveWsUrl({
+      host: '192.0.2.1',
+      port: 9998,
+      fetchImpl: async () => ({
+        ok: true,
+        json: async () => [],
+      }),
+    }).catch((error) => error);
+    const ambiguous = (() => {
+      try {
+        selectPageTarget(pages, 'http://host/');
+      } catch (error) {
+        return error;
+      }
+      return null;
+    })();
+
+    expect(isCdpFallbackEligible(unavailable)).toBe(true);
+    expect(isCdpFallbackEligible(ambiguous)).toBe(false);
   });
 });
 

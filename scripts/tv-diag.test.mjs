@@ -249,6 +249,8 @@ describe('ares-inspect lifecycle', () => {
     );
     expect(await inspector.wsUrl).toBe('ws://localhost:62090/devtools/page/ABC');
     expect(child.killed).toBe(false);
+    inspector.close();
+    expect(child.killed).toBe(true);
   });
 });
 

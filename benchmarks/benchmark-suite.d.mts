@@ -162,6 +162,8 @@ export function measureHostedXMLTVPipelineComparison(
     appId: string;
     chunkBytes?: number;
     chunkDelayMs?: number;
+    advertisedHost?: string;
+    port?: number;
   },
   io: XMLTVPipelineBenchmarkIo,
 ): Promise<{
@@ -192,6 +194,8 @@ export interface LargePlaylistBenchmarkOptions {
   expectedChannels?: number;
   timeoutMs: number;
   deviceIp?: string;
+  advertisedHost?: string;
+  port?: number;
 }
 
 export interface LargePlaylistBenchmarkIo {

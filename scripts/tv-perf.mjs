@@ -14,9 +14,8 @@ import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import {
-  CdpClient,
+  connectCdpWithAresFallback,
   normalizeDeviceConfigurationError,
-  resolveCdpTarget,
   resolveConfiguredDeviceIp,
 } from './cdp-client.mjs';
 import {
@@ -40,6 +39,7 @@ const CPU_PROFILE_PART_COUNT = CPU_PROFILE_DURATION_MS / CPU_PROFILE_PART_DURATI
 const LOG_PRETRIGGER_MS = 30000;
 const LOG_PRETRIGGER_MAX_ENTRIES = 1000;
 const TRACE_BUFFER_SIZE_KB = 4096;
+const DEFAULT_APP_ID = 'com.lennylxx.iptv';
 const TRACE_CATEGORY_CANDIDATES = [
   'devtools.timeline',
   'blink.user_timing',
@@ -250,8 +250,9 @@ export function parsePerformanceArgs(argv = []) {
     host: null,
     port: 9998,
     url: null,
-    target: null,
-    targetSelection: 'strict',
+    target: DEFAULT_APP_ID,
+    appId: DEFAULT_APP_ID,
+    targetSelection: 'legacy-tv-app',
     intervalMs: 1000,
     durationMs: null,
     jsonlPath: null,
@@ -288,10 +289,12 @@ export function parsePerformanceArgs(argv = []) {
         break;
       case '--target':
         options.target = parseNonEmptyString(parseRequiredStringValue(argv, index, token), token);
+        options.targetSelection = 'strict';
         index += 1;
         break;
       case '--app':
-        options.target = parseNonEmptyString(parseRequiredStringValue(argv, index, token), token);
+        options.appId = parseNonEmptyString(parseRequiredStringValue(argv, index, token), token);
+        options.target = options.appId;
         options.targetSelection = 'legacy-tv-app';
         index += 1;
         break;
@@ -905,21 +908,21 @@ export async function takeAllocationSnapshot(
 
 const runWithSignalAbort = async (options, dependencies, action) => {
   const signalSource = dependencies.signalSource ?? process;
-  let client = null;
+  let connection = null;
   const onSignal = () => {
-    client?.close();
+    connection?.close();
   };
 
   signalSource.on('SIGINT', onSignal);
   signalSource.on('SIGTERM', onSignal);
 
   try {
-    ({ client } = await connectClient(options, dependencies));
-    await action(client);
+    connection = await connectClient(options, dependencies);
+    await action(connection.client);
   } finally {
     signalSource.off('SIGINT', onSignal);
     signalSource.off('SIGTERM', onSignal);
-    client?.close();
+    connection?.close();
   }
 };
 
@@ -1116,38 +1119,38 @@ const createRenderer = async (output) => {
 
 const connectClient = async (
   options,
-  { fetchImpl, WebSocketImpl, resolveDeviceIp = resolveConfiguredDeviceIp } = {},
+  {
+    fetchImpl,
+    WebSocketImpl,
+    resolveDeviceIp = resolveConfiguredDeviceIp,
+    spawn,
+    processSource,
+  } = {},
 ) => {
-  let resolved;
   let host = options.host;
-  try {
-    // With neither --host nor --url, fall back to the configured TV device IP
-    // (ares-setup-device), mirroring tv-logs.mjs / tv-eval.mjs.
-    if (!host && !options.url) {
-      try {
-        host = resolveDeviceIp();
-      } catch (error) {
-        throw normalizeDeviceConfigurationError(error);
-      }
+  // With neither --host nor --url, fall back to the configured TV device IP
+  // (ares-setup-device), mirroring tv-logs.mjs / tv-eval.mjs.
+  if (!host && !options.url) {
+    try {
+      host = resolveDeviceIp();
+    } catch (error) {
+      throw normalizeDeviceConfigurationError(error);
     }
-    resolved = await resolveCdpTarget({
-      url: options.url,
-      host,
-      port: options.port,
-      target: options.target,
-      targetSelection: options.targetSelection,
-      fetchImpl,
-    });
-  } catch (error) {
-    throw error;
   }
 
-  try {
-    const client = await CdpClient.connect(resolved.wsUrl, { WebSocketImpl });
-    return { client, target: resolved.target };
-  } catch (error) {
-    throw error;
-  }
+  return connectCdpWithAresFallback({
+    appId: options.appId,
+    device: process.env.TV_DEVICE,
+    url: options.url,
+    host,
+    port: options.port,
+    target: options.target,
+    targetSelection: options.targetSelection,
+    fetchImpl,
+    WebSocketImpl,
+    spawn,
+    processSource,
+  });
 };
 
 export async function runMonitor(options, dependencies = {}) {
@@ -1162,6 +1165,7 @@ export async function runMonitor(options, dependencies = {}) {
   let renderer = null;
   let logCapture = null;
   let removeSignalHandlers = () => {};
+  let connection = null;
   let client = null;
   let cpuProfilerStarted = false;
   let traceSession = null;
@@ -1229,7 +1233,8 @@ export async function runMonitor(options, dependencies = {}) {
     renderer = await createRenderer(stdout);
     removeSignalHandlers = registerSignalHandlers(stopState, signalSource);
     let target;
-    ({ client, target } = await connectClient(options, dependencies));
+    connection = await connectClient(options, dependencies);
+    ({ client, target } = connection);
     if (recorders.logs) {
       logCapture = createLogCapture(client, recorders.logs, {
         deferred: Boolean(options.cpuProfilePath || options.tracePath),
@@ -1314,7 +1319,7 @@ export async function runMonitor(options, dependencies = {}) {
     }
 
     try {
-      client?.close();
+      connection?.close();
     } catch (error) {
       rememberError(error);
     }
@@ -1377,9 +1382,10 @@ export async function main(argv, dependencies = {}) {
   }
 
   if (options.mode === 'allocation-snapshot') {
-    let client = null;
+    let connection = null;
     try {
-      ({ client } = await connectClient(options, dependencies));
+      connection = await connectClient(options, dependencies);
+      const { client } = connection;
       const durationText = options.durationMs == null
         ? 'Press Ctrl-C after reproducing the suspected leak.\n'
         : `Recording allocation stacks for ${options.durationMs / 1000} seconds...\n`;
@@ -1399,7 +1405,7 @@ export async function main(argv, dependencies = {}) {
       await writeChunk(stderr, `tv-perf: ${toError(error).message}\n`);
       return 1;
     } finally {
-      client?.close();
+      connection?.close();
     }
   }
 
