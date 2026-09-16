@@ -771,7 +771,6 @@ export function runRawParserBenchmarks(options) {
     let started = performance.now();
     const m3uResult = api.parseM3U(m3uText);
     const m3uDuration = performance.now() - started;
-    const derivedIndexes = api.profileDerivedIndexes(m3uText);
 
     const base = Date.now() - 6 * 24 * 60 * 60 * 1000;
     const xmltvParts = [
@@ -797,11 +796,6 @@ export function runRawParserBenchmarks(options) {
         channels: m3uResult.channels,
         groups: m3uResult.groups || 0,
       },
-      derivedIndexes: {
-        durationMs: round(derivedIndexes.durationMs),
-        channels: derivedIndexes.channels,
-        groups: derivedIndexes.groups,
-      },
       xmltv: {
         durationMs: round(xmltvDuration),
         bytes: xmltvText.length,
@@ -809,6 +803,51 @@ export function runRawParserBenchmarks(options) {
         programmes: xmltvResult.programmes || 0,
       },
     };
+}
+
+export function prepareDerivedIndexBenchmark(options) {
+    const api = window.__IPTV_BENCHMARK__;
+    if (!api) throw new Error('Benchmark parser API is unavailable');
+    return api.prepareDerivedIndexes(options.scale);
+}
+
+export function runDerivedIndexBenchmarkSample() {
+    const api = window.__IPTV_BENCHMARK__;
+    if (!api) throw new Error('Benchmark parser API is unavailable');
+    return api.measureDerivedIndexes();
+}
+
+export function cleanupDerivedIndexBenchmark() {
+    const api = window.__IPTV_BENCHMARK__;
+    if (!api) throw new Error('Benchmark parser API is unavailable');
+    api.clearDerivedIndexes();
+}
+
+export async function measureDerivedIndexBenchmark(options, io) {
+    const sampleCount = 5;
+    const round = (value) => Math.round(value * 10) / 10;
+    await io.evaluate(prepareDerivedIndexBenchmark, options);
+    try {
+      await io.collectGarbage();
+      await io.evaluate(runDerivedIndexBenchmarkSample);
+      const samples = [];
+      let latest;
+      for (let index = 0; index < sampleCount; index++) {
+        await io.collectGarbage();
+        latest = await io.evaluate(runDerivedIndexBenchmarkSample);
+        samples.push(latest.durationMs);
+      }
+      const sorted = samples.slice().sort((a, b) => a - b);
+      return {
+        durationMs: round(sorted[Math.floor(sorted.length / 2)]),
+        samplesMs: samples.map(round),
+        channels: latest.channels,
+        groups: latest.groups,
+      };
+    } finally {
+      await io.evaluate(cleanupDerivedIndexBenchmark);
+      await io.collectGarbage();
+    }
 }
 
 /**

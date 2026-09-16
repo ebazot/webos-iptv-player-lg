@@ -14,11 +14,26 @@ import { isMpdText } from '../utils/url';
 export interface M3UParseOptions {
   maxChannels?: number;
   maxIssues?: number;
-  acceptChannel?: (channel: Channel) => boolean;
+  streamLocationPrefilter?: (location: string) => boolean;
+  channelPostfilter?: (channel: Channel) => boolean;
   channelBatchSize?: number;
   onChannelBatch?: (channels: Channel[]) => void;
 }
 
+type PendingDirectiveKind =
+  | 'group'
+  | 'vlc-option'
+  | 'kodi-property'
+  | 'http-headers';
+
+interface PendingChannelDirective {
+  kind: PendingDirectiveKind;
+  body: string;
+  lineNo: number;
+}
+
+/* The first pending directive stays in parser fields so the common Xtream
+ * entry shape does not allocate a per-record array or wrapper object. */
 const DEFAULT_MAX_ISSUES = 500;
 const SAMPLE_CHARS = 64 * 1024;
 const STRING_DETACH_BATCH_SIZE = 512;
@@ -42,7 +57,8 @@ export class M3UStreamParser {
   private readonly issues: PlaylistParseIssue[] = [];
   private readonly maxIssues: number;
   private readonly maxChannels: number;
-  private readonly acceptChannel?: (channel: Channel) => boolean;
+  private readonly streamLocationPrefilter?: (location: string) => boolean;
+  private readonly channelPostfilter?: (channel: Channel) => boolean;
   private readonly channelBatchSize: number;
   private readonly onChannelBatch?: (channels: Channel[]) => void;
   private readonly pendingLines: string[] = [];
@@ -50,6 +66,11 @@ export class M3UStreamParser {
   private sample = '';
   private detection: PlaylistFormatDetection | null = null;
   private current: Channel | null = null;
+  private pendingExtInfBody: string | null = null;
+  private pendingDirectiveKind: PendingDirectiveKind | null = null;
+  private pendingDirectiveBody = '';
+  private pendingDirectiveLineNo = 0;
+  private additionalPendingDirectives: PendingChannelDirective[] | null = null;
   private epgUrls: string[] = [];
   private maxConnections: number | undefined;
   private playlistName: string | undefined;
@@ -65,7 +86,8 @@ export class M3UStreamParser {
   ) {
     this.maxIssues = options.maxIssues ?? DEFAULT_MAX_ISSUES;
     this.maxChannels = options.maxChannels ?? 0;
-    this.acceptChannel = options.acceptChannel;
+    this.streamLocationPrefilter = options.streamLocationPrefilter;
+    this.channelPostfilter = options.channelPostfilter;
     this.channelBatchSize = options.channelBatchSize ?? 0;
     this.onChannelBatch = options.onChannelBatch;
   }
@@ -158,11 +180,11 @@ export class M3UStreamParser {
       return result([], [], [], this.headerAttributes, detection.format, this.issues);
     }
 
-    if (this.current) {
+    if (this.current || this.pendingExtInfBody !== null) {
       this.addIssue(
         'warning',
         'orphan-extinf',
-        `"${this.current.name}" has no stream URL; skipped`,
+        `"${this.pendingChannelName()}" has no stream URL; skipped`,
         this.lineNo,
       );
     }
@@ -250,27 +272,47 @@ export class M3UStreamParser {
         this.applyHeader(body);
         break;
       case '#EXTINF':
-        if (this.current) {
+        if (this.current || this.pendingExtInfBody !== null) {
           this.addIssue(
             'warning',
             'orphan-extinf',
-            `"${this.current.name}" has no stream URL; skipped`,
+            `"${this.pendingChannelName()}" has no stream URL; skipped`,
             this.lineNo - 1,
           );
         }
-        this.current = parseExtInf(body);
+        if (this.streamLocationPrefilter) {
+          this.current = null;
+          if (this.pendingExtInfBody !== null) this.clearPendingChannel();
+          this.pendingExtInfBody = body;
+        } else {
+          this.current = parseExtInf(body);
+        }
         break;
       case '#EXTGRP':
-        if (this.current) applyGroups(this.current, body.trim(), true);
+        if (this.pendingExtInfBody !== null) {
+          this.queuePendingDirective('group', body);
+        } else if (this.current) {
+          applyGroups(this.current, body.trim(), true);
+        }
         break;
       case '#EXTVLCOPT':
-        if (this.current) addExtra(this.current, body, false);
+        if (this.pendingExtInfBody !== null) {
+          this.queuePendingDirective('vlc-option', body);
+        } else if (this.current) {
+          addExtra(this.current, body, false);
+        }
         break;
       case '#KODIPROP':
-        if (this.current) addExtra(this.current, body, true);
+        if (this.pendingExtInfBody !== null) {
+          this.queuePendingDirective('kodi-property', body);
+        } else if (this.current) {
+          addExtra(this.current, body, true);
+        }
         break;
       case '#EXTHTTP':
-        if (this.current) {
+        if (this.pendingExtInfBody !== null) {
+          this.queuePendingDirective('http-headers', body, this.lineNo);
+        } else if (this.current) {
           parseHttpHeaders(
             this.current,
             body,
@@ -308,6 +350,17 @@ export class M3UStreamParser {
       );
       return;
     }
+    if (
+      this.streamLocationPrefilter
+      && !this.streamLocationPrefilter(line)
+    ) {
+      this.current = null;
+      this.clearPendingChannel();
+      return;
+    }
+    if (this.pendingExtInfBody !== null) {
+      this.current = this.materializePendingChannel();
+    }
     if (!this.current) this.current = emptyChannel(nameFromUrl(line));
     this.current.url = line;
     if (this.current.catchup.toLowerCase() === 'xc' && !this.current.catchupSource) {
@@ -324,7 +377,7 @@ export class M3UStreamParser {
     }
     const channel = this.current;
     this.current = null;
-    if (this.acceptChannel && !this.acceptChannel(channel)) return;
+    if (this.channelPostfilter && !this.channelPostfilter(channel)) return;
     channel.group = this.internGroup(channel.group);
     if (channel.sourceGroups) {
       channel.sourceGroups = channel.sourceGroups.map(group => this.internGroup(group));
@@ -351,6 +404,76 @@ export class M3UStreamParser {
       );
       this.stopped = true;
     }
+  }
+
+  private pendingChannelName(): string {
+    return this.current?.name
+      ?? (this.pendingExtInfBody !== null
+        ? parseExtInf(this.pendingExtInfBody).name
+        : '');
+  }
+
+  private queuePendingDirective(
+    kind: PendingDirectiveKind,
+    body: string,
+    lineNo = 0,
+  ): void {
+    if (this.pendingDirectiveKind === null) {
+      this.pendingDirectiveKind = kind;
+      this.pendingDirectiveBody = body;
+      this.pendingDirectiveLineNo = lineNo;
+      return;
+    }
+    if (!this.additionalPendingDirectives) this.additionalPendingDirectives = [];
+    const directive: PendingChannelDirective = { kind, body, lineNo };
+    this.additionalPendingDirectives.push(directive);
+  }
+
+  private materializePendingChannel(): Channel {
+    const channel = parseExtInf(this.pendingExtInfBody!);
+    if (this.pendingDirectiveKind !== null) {
+      this.applyPendingDirective(
+        channel,
+        this.pendingDirectiveKind,
+        this.pendingDirectiveBody,
+        this.pendingDirectiveLineNo,
+      );
+    }
+    if (this.additionalPendingDirectives) {
+      for (const directive of this.additionalPendingDirectives) {
+        this.applyPendingDirective(channel, directive.kind, directive.body, directive.lineNo);
+      }
+    }
+    this.clearPendingChannel();
+    return channel;
+  }
+
+  private applyPendingDirective(
+    channel: Channel,
+    kind: PendingDirectiveKind,
+    body: string,
+    lineNo: number,
+  ): void {
+    if (kind === 'group') applyGroups(channel, body.trim(), true);
+    else if (kind === 'vlc-option') addExtra(channel, body, false);
+    else if (kind === 'kodi-property') addExtra(channel, body, true);
+    else if (kind === 'http-headers') {
+      parseHttpHeaders(
+        channel,
+        body,
+        lineNo,
+        (level, code, message, issueLineNo) =>
+          this.addIssue(level, code, message, issueLineNo),
+      );
+    }
+  }
+
+  private clearPendingChannel(): void {
+    this.pendingExtInfBody = null;
+    this.pendingDirectiveKind = null;
+    this.pendingDirectiveBody = '';
+    this.pendingDirectiveLineNo = 0;
+    this.additionalPendingDirectives = null;
   }
 
   private flushChannelBatch(): void {

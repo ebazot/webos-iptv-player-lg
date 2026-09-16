@@ -150,6 +150,68 @@ describe('fetchAndParseM3UInWorker', () => {
     });
   });
 
+  it('early-rejects only canonical non-Live locations across chunk boundaries', async () => {
+    const source = [
+      '#EXTM3U',
+      '#EXTINF:-1 custom-field="movie",Movie',
+      '#EXTHTTP:{bad',
+      'http://host/movie/u1/p1/201.mp4',
+      '#EXTINF:-1 custom-field="series",Series',
+      '#EXTHTTP:{bad',
+      'http://host/series/u1/p1/301.mkv',
+      '#EXTINF:-1 custom-field="live",Alpha',
+      'http://host/live/u1/p1/101.ts',
+      '#EXTINF:-1 custom-field="provider",Provider',
+      '#EXTHTTP:{bad',
+      'http://host/proxy/movie/u1/p1/202.mp4?stream_id=102',
+      '#EXTINF:-1 custom-field="alternate",Alternate',
+      '#EXTHTTP:{bad',
+      'http://host/vod/u1/p1/203.mkv?stream_id=103',
+      '#EXTINF:-1 custom-field="malformed",Malformed',
+      '#EXTHTTP:{bad',
+      'not a url',
+      '#EXTINF:-1 custom-field="direct",Bravo',
+      'https://host/movie/u1/p1/104.ts?token=new',
+    ].join('\n');
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      streamResponse(splitBytes(new TextEncoder().encode(source), 1))));
+
+    const result = await fetchAndParseM3UInWorker({
+      url: 'http://host/get.php',
+      timeout: 5000,
+      xtreamBaseUrl: 'http://host',
+      xtreamLive: [
+        { streamId: '101', directSource: '' },
+        { streamId: '102', directSource: '' },
+        { streamId: '103', directSource: '' },
+        {
+          streamId: '104',
+          directSource: 'https://host/movie/u1/p1/104.ts?token=old',
+        },
+      ],
+    });
+
+    expect(result.data.channels).toEqual([
+      expect.objectContaining({
+        name: 'Alpha',
+        sourceAttributes: { 'custom-field': 'live' },
+        catchupStreamId: '101',
+      }),
+      expect.objectContaining({
+        name: 'Bravo',
+        sourceAttributes: { 'custom-field': 'direct' },
+        catchupStreamId: '104',
+      }),
+    ]);
+    expect(result.data.issues.filter(issue => issue.code === 'bad-exthttp'))
+      .toHaveLength(2);
+    expect(result.metrics).toMatchObject({
+      filter: 'live_catalog',
+      channelsKept: 2,
+      channelsDropped: 5,
+    });
+  });
+
   it('does not guess stream identity when the Live catalog is unavailable', async () => {
     const source = [
       '#EXTM3U',

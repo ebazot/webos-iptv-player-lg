@@ -20,6 +20,7 @@ import {
   installM3USearchFixture,
   installUniqueGroupFixture,
   inspectPointerBenchmark,
+  measureDerivedIndexBenchmark,
   measureStartupHoverBenchmark,
   measureLargePlaylistMemory,
   preparePointerBenchmark,
@@ -177,7 +178,6 @@ test('records 50,000-item application benchmarks', async ({
     const pointerReport = await page.evaluate(inspectPointerBenchmark);
     assertPointerBenchmark(pointerReport, SCALE);
     suites.interactions.magicRemote = pointerReport;
-    assertBenchmarkScale(suites, SCALE);
 
     await cdp.send('HeapProfiler.collectGarbage');
     const beforeReopen = await cdp.send('Runtime.getHeapUsage');
@@ -238,6 +238,17 @@ test('records 50,000-item application benchmarks', async ({
     assertColdLoadBenchmark(coldLoad, SCALE);
     suites.coldLoad = coldLoad;
     const largePlaylist = await runDesktopLargePlaylistBenchmark(browser);
+    await page.addScriptTag({
+      content: await readFile('test-output/benchmarks/parser-bundle.js', 'utf8'),
+    });
+    parsers.derivedIndexes = await measureDerivedIndexBenchmark(
+      { scale: SCALE },
+      {
+        evaluate: (fn, arg) => page.evaluate(fn as never, arg),
+        collectGarbage: () => cdp.send('HeapProfiler.collectGarbage'),
+      },
+    );
+    assertBenchmarkScale(suites, SCALE);
     const report = {
       version: 1,
       target: 'desktop-chromium',

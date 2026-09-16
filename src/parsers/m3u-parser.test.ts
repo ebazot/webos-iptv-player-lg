@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   decodePlaylistBytes,
   detectPlaylistFormat,
@@ -255,7 +255,7 @@ describe('parseM3U', () => {
 
   it('filters a completed entry before retaining its groups', () => {
     const parser = new M3UStreamParser('', {
-      acceptChannel: channel => channel.url.endsWith('/keep'),
+      channelPostfilter: channel => channel.url.endsWith('/keep'),
     });
     parser.write([
       '#EXTM3U',
@@ -268,6 +268,58 @@ describe('parseM3U', () => {
     const result = parser.finish();
     expect(result.channels.map(channel => channel.name)).toEqual(['Keep']);
     expect(result.groups).toEqual(['Kept']);
+  });
+
+  it('can reject a location before materializing channel metadata', () => {
+    const channelPostfilter = vi.fn(() => true);
+    const parser = new M3UStreamParser('', {
+      streamLocationPrefilter: location => !location.includes('/movie/'),
+      channelPostfilter,
+    });
+    parser.write([
+      '#EXTM3U',
+      '#EXTINF:-1 group-title="Dropped" custom-field="value",Movie',
+      '#EXTHTTP:{bad',
+      'http://host/movie/u1/p1/201.mp4',
+      '#EXTINF:-1 group-title="Live",Alpha',
+      '#EXTHTTP:{"User-Agent":"Agent"}',
+      'http://host/live/u1/p1/101.ts',
+    ].join('\n'));
+
+    const result = parser.finish();
+
+    expect(channelPostfilter).toHaveBeenCalledTimes(1);
+    expect(result.channels).toEqual([
+      expect.objectContaining({
+        name: 'Alpha',
+        group: 'Live',
+        extras: { 'http-user-agent': 'Agent' },
+      }),
+    ]);
+    expect(result.groups).toEqual(['Live']);
+    expect(result.issues).not.toContainEqual(
+      expect.objectContaining({ code: 'bad-exthttp' }),
+    );
+  });
+
+  it('keeps ordinary M3U parsing unchanged without a location hook', () => {
+    const result = parseM3U([
+      '#EXTM3U',
+      '#EXTINF:-1 group-title="Movies" custom-field="value",Movie',
+      '#EXTHTTP:{bad',
+      'http://host/movie/u1/p1/201.mp4',
+    ].join('\n'));
+
+    expect(result.channels).toEqual([
+      expect.objectContaining({
+        name: 'Movie',
+        group: 'Movies',
+        sourceAttributes: { 'custom-field': 'value' },
+      }),
+    ]);
+    expect(result.issues).toContainEqual(
+      expect.objectContaining({ code: 'bad-exthttp' }),
+    );
   });
 
   it('accepts lone CR line endings', () => {

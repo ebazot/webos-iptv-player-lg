@@ -4,7 +4,9 @@ import {
   parseM3UBytes,
   type M3UParseOptions,
 } from './m3u-parser';
-import { createXtreamLiveMatcher } from '../utils/xtream-live-match';
+import {
+  createXtreamLiveMatcher,
+} from '../utils/xtream-live-match';
 import { createLogger } from '../utils/logger';
 import { runAppWorkerTask } from '../workers/app-worker-client';
 import type {
@@ -165,7 +167,10 @@ export async function fetchAndParseM3UInWorker(
   emitChunk?: (chunk: M3UWorkerChunk) => void,
 ): Promise<M3UWorkerResponse> {
   const started = Date.now();
-  const filter = createM3UChannelFilter(request.xtreamLive, request.xtreamBaseUrl);
+  const liveFilters = createXtreamM3ULiveFilters(
+    request.xtreamLive,
+    request.xtreamBaseUrl,
+  );
   let emittedChannels = 0;
   let inputBytes = 0;
   let chunks = 0;
@@ -174,7 +179,12 @@ export async function fetchAndParseM3UInWorker(
   let reportedChannelsEmitted = -1;
   let reportedChannelsDropped = -1;
   const options: M3UParseOptions = {
-    ...(filter.accept ? { acceptChannel: filter.accept } : {}),
+    ...(liveFilters.streamLocationPrefilter
+      ? { streamLocationPrefilter: liveFilters.streamLocationPrefilter }
+      : {}),
+    ...(liveFilters.channelPostfilter
+      ? { channelPostfilter: liveFilters.channelPostfilter }
+      : {}),
     ...(emitChunk
       ? {
           channelBatchSize: CHANNEL_BATCH_SIZE,
@@ -186,7 +196,7 @@ export async function fetchAndParseM3UInWorker(
               inputBytes,
               chunks,
               channelsEmitted: emittedChannels,
-              channelsDropped: filter.dropped(),
+              channelsDropped: liveFilters.getDroppedCount(),
             };
             emitChunk(chunk);
             rememberProgress(chunk);
@@ -244,11 +254,11 @@ export async function fetchAndParseM3UInWorker(
       data,
       metrics: {
         transport,
-        filter: filter.kind,
+        filter: liveFilters.mode,
         inputBytes,
         chunks,
         channelsKept,
-        channelsDropped: filter.dropped(),
+        channelsDropped: liveFilters.getDroppedCount(),
         elapsedMs: Date.now() - started,
       },
     };
@@ -261,7 +271,7 @@ export async function fetchAndParseM3UInWorker(
         : stage === 'fetch' && message.startsWith('HTTP ')
           ? 'http'
           : 'exception',
-      filter: filter.kind,
+      filter: liveFilters.mode,
       inputBytes,
       chunks,
       elapsedMs: Date.now() - started,
@@ -278,7 +288,7 @@ export async function fetchAndParseM3UInWorker(
       inputBytes,
       chunks,
       channelsEmitted: emittedChannels,
-      channelsDropped: filter.dropped(),
+      channelsDropped: liveFilters.getDroppedCount(),
     };
     if (force
       && progress.inputBytes === reportedInputBytes
@@ -298,32 +308,46 @@ export async function fetchAndParseM3UInWorker(
   }
 }
 
-export function createM3UChannelFilter(
+interface XtreamM3ULiveFilters {
+  mode: M3UWorkerResponse['metrics']['filter'];
+  streamLocationPrefilter?: (location: string) => boolean;
+  channelPostfilter?: (channel: Channel) => boolean;
+  getDroppedCount(): number;
+}
+
+export function createXtreamM3ULiveFilters(
   references?: XtreamLiveReference[],
   baseUrl = '',
-): {
-  kind: M3UWorkerResponse['metrics']['filter'];
-  accept?: (channel: Channel) => boolean;
-  dropped(): number;
-} {
-  let rejected = 0;
+): XtreamM3ULiveFilters {
+  let droppedChannels = 0;
   if (references === undefined) {
-    return { kind: baseUrl ? 'unavailable' : 'none', dropped: () => rejected };
+    return {
+      mode: baseUrl ? 'unavailable' : 'none',
+      getDroppedCount: () => droppedChannels,
+    };
   }
 
-  const matchLive = createXtreamLiveMatcher(references, baseUrl);
+  const liveMatcher = createXtreamLiveMatcher(
+    references,
+    baseUrl,
+  );
   return {
-    kind: 'live_catalog',
-    accept: channel => {
-      const streamId = matchLive(channel.url);
+    mode: 'live_catalog',
+    streamLocationPrefilter: location => {
+      if (liveMatcher.streamLocationPrefilter(location)) return true;
+      droppedChannels++;
+      return false;
+    },
+    channelPostfilter: channel => {
+      const streamId = liveMatcher.resolveStreamId(channel.url);
       if (!streamId) {
-        rejected++;
+        droppedChannels++;
         return false;
       }
       channel.catchupStreamId = channel.catchupStreamId || streamId;
       return true;
     },
-    dropped: () => rejected,
+    getDroppedCount: () => droppedChannels,
   };
 }
 

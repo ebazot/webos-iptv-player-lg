@@ -585,13 +585,20 @@
     "nodes": 1652,
     "parsers": {
       "m3u": {
-        "durationMs": 206.5,
+        "durationMs": 196.9,
         "bytes": 4111677,
         "channels": 50000,
         "groups": 100
       },
       "derivedIndexes": {
-        "durationMs": 200.8,
+        "durationMs": 227.8,
+        "samplesMs": [
+          204,
+          228.8,
+          216.3,
+          227.8,
+          395.5
+        ],
         "channels": 50000,
         "groups": 100
       },
@@ -723,7 +730,7 @@
       "startupMs": 3325
     },
     "coldLoad": {
-      "readyMs": 940.8,
+      "readyMs": 916.5,
       "rendered": 35,
       "channels": 50000
     },
@@ -749,22 +756,22 @@
         "catalogMiB": 1.1,
         "chunkBytes": 65536,
         "chunkDelayMs": 0,
-        "playlistDurationMs": 2327.54,
-        "readyMs": 2788.77,
+        "playlistDurationMs": 1227.4,
+        "readyMs": 1554.07,
         "channels": 50000,
-        "samples": 87,
+        "samples": 58,
         "baselineRendererProcesses": 2,
         "peakRendererProcesses": 2,
-        "baselineRssMiB": 741.25,
-        "peakRssMiB": 1027.16,
-        "peakRssDeltaMiB": 285.91,
-        "retainedRssMiB": 904.23,
-        "retainedRssDeltaMiB": 162.98,
-        "baselineHeapMiB": 2.45,
-        "peakHeapMiB": 60.07,
-        "peakHeapDeltaMiB": 57.62,
-        "retainedHeapMiB": 30.86,
-        "retainedHeapDeltaMiB": 28.41
+        "baselineRssMiB": 704.58,
+        "peakRssMiB": 999.38,
+        "peakRssDeltaMiB": 294.8,
+        "retainedRssMiB": 820.91,
+        "retainedRssDeltaMiB": 116.33,
+        "baselineHeapMiB": 2.47,
+        "peakHeapMiB": 72.43,
+        "peakHeapDeltaMiB": 69.97,
+        "retainedHeapMiB": 31.12,
+        "retainedHeapDeltaMiB": 28.66
       }
     }
   }

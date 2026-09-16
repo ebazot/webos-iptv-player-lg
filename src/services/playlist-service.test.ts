@@ -40,26 +40,34 @@ vi.mock('../parsers/m3u-loader', async (importOriginal) => {
     ) => {
       const text = await fetchTextMock(url, timeout);
       const { parseM3U } = await import('../parsers/m3u-parser');
-      const filter = actual.createM3UChannelFilter(streams, baseUrl);
-      const data = parseM3U(text, url, filter.accept
-        ? { acceptChannel: filter.accept }
-        : {});
+      const liveFilters = actual.createXtreamM3ULiveFilters(streams, baseUrl);
+      const data = parseM3U(text, url, {
+        ...(liveFilters.streamLocationPrefilter
+          ? {
+              streamLocationPrefilter:
+                liveFilters.streamLocationPrefilter,
+            }
+          : {}),
+        ...(liveFilters.channelPostfilter
+          ? { channelPostfilter: liveFilters.channelPostfilter }
+          : {}),
+      });
       onProgress?.({
         inputBytes: text.length,
         chunks: 1,
-        channelsProcessed: data.channels.length + filter.dropped(),
+        channelsProcessed: data.channels.length + liveFilters.getDroppedCount(),
         channelsKept: data.channels.length,
-        channelsDropped: filter.dropped(),
+        channelsDropped: liveFilters.getDroppedCount(),
       });
       return {
         data,
         metrics: {
           transport: 'stream' as const,
-          filter: filter.kind,
+          filter: liveFilters.mode,
           inputBytes: text.length,
           chunks: 1,
           channelsKept: data.channels.length,
-          channelsDropped: filter.dropped(),
+          channelsDropped: liveFilters.getDroppedCount(),
           elapsedMs: 0,
         },
       };

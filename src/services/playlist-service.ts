@@ -21,7 +21,7 @@ import {
   channelKey,
   legacyChannelKey,
 } from '../utils/channel';
-import { createXtreamLiveMatcher } from '../utils/xtream-live-match';
+import { createXtreamLiveStreamIdResolver } from '../utils/xtream-live-match';
 import {
   prepareSearchItem,
   rankPreparedTopK,
@@ -491,13 +491,16 @@ class PlaylistServiceImpl {
 
     const clock = await client.getServerClock();
     const knownIds = new Set(streams.map(stream => stream.streamId));
-    const matchLive = createXtreamLiveMatcher(streams, credentials.baseUrl);
+    const resolveLiveStreamId = createXtreamLiveStreamIdResolver(
+      streams,
+      credentials.baseUrl,
+    );
     let enabled = 0;
     let unmatched = 0;
     for (const channel of channels) {
       const streamId = channel.catchupStreamId && knownIds.has(channel.catchupStreamId)
         ? channel.catchupStreamId
-        : matchLive(channel.url);
+        : resolveLiveStreamId(channel.url);
       const stream = archived.get(streamId);
       if (!stream) {
         if (!streamId) unmatched++;

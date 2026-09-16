@@ -77,12 +77,29 @@ export function runRawParserBenchmarks(
   options: RawParserBenchmarkOptions,
 ): {
   m3u: { durationMs: number; bytes: number; channels: number; groups: number };
-  derivedIndexes: { durationMs: number; channels: number; groups: number };
+  derivedIndexes?: DerivedIndexBenchmark;
   xmltv: { durationMs: number; bytes: number; channels: number; programmes: number };
   xmltvCatalog?: XMLTVCatalogBenchmark;
   xmltvPipeline?: XMLTVPipelineBenchmark;
   xmltvPipelineBuffered?: XMLTVPipelineBenchmark;
 };
+
+export interface DerivedIndexBenchmark {
+  durationMs: number;
+  samplesMs: number[];
+  channels: number;
+  groups: number;
+}
+
+export interface DerivedIndexBenchmarkIo {
+  evaluate: (fn: unknown, arg?: unknown) => Promise<any>;
+  collectGarbage: () => Promise<unknown>;
+}
+
+export function measureDerivedIndexBenchmark(
+  options: RawParserBenchmarkOptions,
+  io: DerivedIndexBenchmarkIo,
+): Promise<DerivedIndexBenchmark>;
 
 export interface XMLTVPipelineBenchmark {
   durationMs: number;

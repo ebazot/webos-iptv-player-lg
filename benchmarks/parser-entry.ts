@@ -23,7 +23,9 @@ interface BenchmarkXMLTVOptions {
 
 interface BenchmarkParserApi {
   parseM3U(text: string): BenchmarkParseResult;
-  profileDerivedIndexes(text: string): BenchmarkDerivedIndexResult;
+  prepareDerivedIndexes(scale: number): BenchmarkParseResult;
+  measureDerivedIndexes(): BenchmarkDerivedIndexSample;
+  clearDerivedIndexes(): void;
   parseXMLTV(text: string, options?: BenchmarkXMLTVOptions): BenchmarkParseResult;
   loadXMLTV(url: string, options?: BenchmarkXMLTVOptions): Promise<BenchmarkXMLTVLoadResult>;
   profileXMLTV(url: string, options?: BenchmarkXMLTVOptions): Promise<BenchmarkParseResult>;
@@ -34,7 +36,7 @@ interface BenchmarkParserApi {
   workerRunning(): boolean;
 }
 
-interface BenchmarkDerivedIndexResult {
+interface BenchmarkDerivedIndexSample {
   durationMs: number;
   channels: number;
   groups: number;
@@ -42,6 +44,21 @@ interface BenchmarkDerivedIndexResult {
 
 interface BenchmarkXMLTVLoadResult extends BenchmarkParseResult {
   durationMs: number;
+}
+
+type BenchmarkChannels = ReturnType<typeof parseM3U>['channels'];
+
+interface DerivedIndexTarget {
+  channels: BenchmarkChannels;
+  groups: string[];
+  reset(): void;
+  buildDerivedIndexes(): void;
+}
+
+let derivedIndexChannels: BenchmarkChannels | null = null;
+
+function derivedIndexTarget(): DerivedIndexTarget {
+  return PlaylistService as unknown as DerivedIndexTarget;
 }
 
 declare global {
@@ -66,17 +83,28 @@ window.__IPTV_BENCHMARK__ = {
       groups: parsed.groups.length,
     };
   },
-  profileDerivedIndexes(text) {
-    const parsed = parseM3U(text, 'http://host/list.m3u');
+  prepareDerivedIndexes(scale) {
+    const lines = ['#EXTM3U'];
+    for (let index = 0; index < scale; index++) {
+      lines.push(
+        `#EXTINF:-1 tvg-id="ch${String(index)}" group-title="Group ${String(index % 100)}",Channel ${String(index)}`,
+        `http://host/${String(index)}`,
+      );
+    }
+    const parsed = parseM3U(lines.join('\n'), 'http://host/list.m3u');
     for (const channel of parsed.channels) channel.playlistIds = ['benchmark'];
-    const target = PlaylistService as unknown as {
-      channels: typeof parsed.channels;
-      groups: string[];
-      reset(): void;
-      buildDerivedIndexes(): void;
+    derivedIndexChannels = parsed.channels;
+    derivedIndexTarget().reset();
+    return {
+      channels: parsed.channels.length,
+      groups: parsed.groups.length,
     };
+  },
+  measureDerivedIndexes() {
+    if (!derivedIndexChannels) throw new Error('Derived-index fixture is unavailable');
+    const target = derivedIndexTarget();
     target.reset();
-    target.channels = parsed.channels;
+    target.channels = derivedIndexChannels;
     const started = performance.now();
     target.buildDerivedIndexes();
     return {
@@ -84,6 +112,10 @@ window.__IPTV_BENCHMARK__ = {
       channels: target.channels.length,
       groups: target.groups.length,
     };
+  },
+  clearDerivedIndexes() {
+    derivedIndexTarget().reset();
+    derivedIndexChannels = null;
   },
   parseXMLTV(text, options) {
     const { data, stats } = parseXMLTVWithStats(text, {

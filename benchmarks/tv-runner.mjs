@@ -17,6 +17,7 @@ import {
   installColdLoadFixture,
   buildM3UFixture,
   cleanupBenchmarkFixture,
+  measureDerivedIndexBenchmark,
   measureXMLTVCatalogBenchmark,
   runRawParserBenchmarks,
   runViewReopenCycle,
@@ -549,7 +550,6 @@ async function runTvBenchmark() {
     const pointerReport = await evaluate(client, inspectPointerBenchmark);
     assertPointerBenchmark(pointerReport, SCALE);
     suites.interactions.magicRemote = pointerReport;
-    assertBenchmarkScale(suites, SCALE);
     await client.call('HeapProfiler.collectGarbage');
     const beforeReopen = await client.call('Runtime.getHeapUsage');
     const reopenHeap = [];
@@ -603,6 +603,15 @@ async function runTvBenchmark() {
     assertColdLoadBenchmark(coldLoad, SCALE);
     suites.coldLoad = coldLoad;
     const largePlaylist = await runLargePlaylistMemory(client);
+    await installParserBundle(client);
+    parsers.derivedIndexes = await measureDerivedIndexBenchmark(
+      { scale: SCALE },
+      {
+        evaluate: (fn, arg) => evaluate(client, fn, arg),
+        collectGarbage: () => client.call('HeapProfiler.collectGarbage'),
+      },
+    );
+    assertBenchmarkScale(suites, SCALE);
     const device = await readDevice(client);
     const report = {
       version: 1,
