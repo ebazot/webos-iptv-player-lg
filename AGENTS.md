@@ -55,11 +55,14 @@ packages the IPK. Pushes/PRs to `main` build; tagged `v*` pushes publish a GitHu
 release with the `.ipk`.
 
 After bundled-service changes, run `npm run service:smoke`. It downloads the
-official Node.js 0.12.2 archive, verifies its published SHA-256, caches it under
+official Node.js 0.12.2 runtime, verifies its published SHA-256, caches it under
 the user cache directory, then parses and exercises the compiled service with
 that exact runtime. CI runs `npm run service:smoke:matrix` across Node.js 0.12.2,
 8.12.0, 12.21.0, 16.19.1, and 20.12.2, representing webOS 4 through 26. On
 Apple Silicon, Node 16/20 use arm64 while older releases use x64 through Rosetta.
+On Windows, v0.12.2 uses the loose x64/node.exe (that release predates the win
+zips) and newer runtimes extract the official win-x64.zip with Expand-Archive;
+Windows ARM64 hosts emulate the x64 builds.
 
 ## Versioning
 

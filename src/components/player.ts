@@ -24,7 +24,7 @@ import { StorageService } from '../services/storage-service';
 import { CONFIG } from '../config';
 import { StallWatchdog, type StallProbe, type StallRecovery } from '../utils/stall-watchdog';
 import { StartupWatchdog, type StartupFailure, type StartupProbe } from '../utils/startup-watchdog';
-import { resolutionBadge, hdrLabel, frameRateLabel, pickVariant, codecName, audioSummary, subtitleSummary, type StreamVariant, type MediaInfo } from '../utils/stream-info';
+import { resolutionBadge, hdrLabel, frameRateLabel, frameRateExact, pickVariant, codecName, bitrateLabel, channelLayoutLabel, containerLabel, audioSummary, subtitleSummary, type StreamVariant, type MediaInfo } from '../utils/stream-info';
 import { extFromUrl, diagnosticStreamUrl } from '../utils/url';
 import { probeMedia } from '../services/media-probe';
 import { ChannelHealthService } from '../services/channel-health';
@@ -590,6 +590,11 @@ export class Player {
     switch (action) {
       case 'back':
       case 'stop': {
+        // Back first collapses the tech tray; a second Back leaves the player.
+        if (action === 'back' && this.osd.techDetailsOpen()) {
+          this.osd.closeTechDetails();
+          break;
+        }
         const back = this.vod?.onBack;
         this.stop();       // saves the resume point, clears VOD state
         back?.();
@@ -616,7 +621,7 @@ export class Player {
         if (this.videoEl && !this.videoEl.paused) this.pauseToggle();
         break;
       case 'yellow':
-        this.showOSD();
+        this.toggleTechInfo();
         break;
       default:
         break; // up/down/channel_up/channel_down are no-ops (no channels in VOD)
@@ -1100,7 +1105,8 @@ export class Player {
   }
 
   // Resolution comes from the video element; other fields use the active MSE
-  // rendition, native manifest metadata or the VOD container probe.
+  // rendition, native manifest metadata or the VOD container probe. The trailing
+  // fields feed the OSD's technical-details tray (and three of them ambient pills).
   private streamInfo(): PlayerOsdStreamInfo | null {
     const v = this.videoEl;
     const lvl = this.pipeline.streamInfo();
@@ -1109,19 +1115,34 @@ export class Player {
     const variant = !this.pipeline.isMseActive() && v
       ? pickVariant(this.manifestVariants, v.videoWidth, v.videoHeight)
       : null;
-    const vCodec = codecName(lvl?.videoCodec ?? variant?.videoCodec ?? info?.videoCodec ?? '');
-    const aCodecName = codecName(lvl?.audioCodec ?? variant?.audioCodec ?? info?.audioCodec ?? '');
+    const vToken = lvl?.videoCodec ?? variant?.videoCodec ?? info?.videoCodec ?? '';
+    const aToken = lvl?.audioCodec ?? variant?.audioCodec ?? info?.audioCodec ?? '';
+    const vCodec = codecName(vToken);
+    const aCodecName = codecName(aToken);
     // Atmos (JOC): native path from the manifest variant's audio group; hls.js from
     // the active audio track's channel layout — loadLevelObj carries no channels.
     const hlsChannels = lvl?.audioChannels ?? '';
     const atmos = lvl?.audioAtmos ?? (variant?.atmos || /\bJOC\b/i.test(hlsChannels));
     const aCodec = aCodecName && atmos ? `${aCodecName} Atmos` : aCodecName;
+    const rawFps = lvl?.frameRate ?? variant?.frameRate ?? info?.fps ?? 0;
     const hdr = hdrLabel(lvl?.videoRange ?? variant?.videoRange ?? info?.hdr ?? '');
-    const fps = frameRateLabel(lvl?.frameRate ?? variant?.frameRate ?? info?.fps ?? 0);
+    const fps = frameRateLabel(rawFps);
     const drm = this.pipeline.drmLabel();
-    const audio = audioSummary(this.tracks.getAudioTracks());
-    const subtitle = subtitleSummary(this.tracks.getSubtitleTracks());
-    if (!(badge || hdr || drm || fps || vCodec || aCodec || audio || subtitle)) return null;
+    const audioTracks = this.tracks.getAudioTracks();
+    const subtitleTracks = this.tracks.getSubtitleTracks();
+    const audio = audioSummary(audioTracks);
+    const subtitle = subtitleSummary(subtitleTracks);
+    // Bitrate: the engine's live level on the MSE path, else the matched master
+    // variant's nominal BANDWIDTH (native HLS). VOD has neither.
+    const bitrate = bitrateLabel(lvl?.bitrate ?? variant?.bandwidth ?? 0);
+    const channels = channelLayoutLabel(hlsChannels);
+    const container = containerLabel(this.streamUrl());
+    const size = v && v.videoWidth && v.videoHeight
+      ? `${v.videoWidth}×${v.videoHeight}`
+      : info?.width && info?.height ? `${info.width}×${info.height}` : '';
+    const audioLang = this.tracks.activeAudioLang();
+    if (!(badge || hdr || drm || fps || vCodec || aCodec || audio || subtitle ||
+        container || bitrate || channels)) return null;
     return {
       resolution: badge,
       hdr,
@@ -1131,7 +1152,52 @@ export class Player {
       audioCodec: aCodec,
       audio,
       subtitle,
+      container,
+      bitrate,
+      channels,
+      size,
+      videoToken: vToken,
+      audioToken: aToken,
+      fpsExact: frameRateExact(rawFps),
+      audioLang,
+      bufferedSeconds: this.bufferedAhead(v),
+      droppedFrames: this.droppedFrames(v),
+      url: diagnosticStreamUrl(this.streamUrl()),
     };
+  }
+
+  /** The URL currently being played (catch-up rewritten, VOD item), for the
+   *  container label and the tray's source row. */
+  private streamUrl(): string {
+    if (this.vod) return this.vod.url;
+    return this.currentChannel
+      ? this.resolveStreamUrl(this.currentChannel, this.catchupInfo)
+      : '';
+  }
+
+  // Seconds of media buffered ahead of the playhead (from the range covering it).
+  private bufferedAhead(v: HTMLVideoElement | null): number {
+    if (!v || !('buffered' in v) || !v.buffered || !v.buffered.length) return 0;
+    for (let i = 0; i < v.buffered.length; i++) {
+      if (v.buffered.start(i) <= v.currentTime && v.currentTime <= v.buffered.end(i)) {
+        return Math.max(0, Math.round(v.buffered.end(i) - v.currentTime));
+      }
+    }
+    return 0;
+  }
+
+  // Dropped video frames, when the engine exposes the playback-quality API.
+  private droppedFrames(v: HTMLVideoElement | null): number {
+    const quality = v && typeof v.getVideoPlaybackQuality === 'function'
+      ? v.getVideoPlaybackQuality()
+      : null;
+    return quality ? quality.droppedVideoFrames : 0;
+  }
+
+  /** The Yellow button: reveal the OSD and toggle its technical-details tray. */
+  toggleTechInfo(): void {
+    if (!this.osd.isVisible()) this.osd.show();
+    this.osd.toggleTechDetails();
   }
 
   private osdSnapshot(): PlayerOsdSnapshot {
@@ -1266,6 +1332,11 @@ export class Player {
     switch (action) {
       case 'back':
       case 'stop':
+        // Back first collapses the tech tray; a second Back leaves the player.
+        if (action === 'back' && this.osd.techDetailsOpen()) {
+          this.osd.closeTechDetails();
+          break;
+        }
         this.stop();
         this.onBack();
         break;
@@ -1293,7 +1364,7 @@ export class Player {
         this.channelDown();
         break;
       case 'yellow':
-        this.showOSD();
+        this.toggleTechInfo();
         break;
       case 'play':
         if (this.videoEl?.paused) this.pauseToggle();

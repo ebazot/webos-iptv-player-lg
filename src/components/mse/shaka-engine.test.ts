@@ -25,9 +25,25 @@ describe('Shaka stream information', () => {
     const engine = createShakaEngine(player);
     expect(engine.streamInfo()).toEqual({
       videoCodec: 'dvh1.05.06', audioCodec, videoRange: 'PQ',
-      frameRate: 59.94, audioChannels: '6', audioAtmos: expected,
+      frameRate: 59.94, audioChannels: '6', audioAtmos: expected, bitrate: 0,
     });
     track.active = false;
     expect(engine.streamInfo()).toBeNull();
+  });
+
+  it('reports the active variant bitrate', () => {
+    const track = {
+      active: true, audioCodec: 'ec-3', spatialAudio: false, channelsCount: 6,
+      videoCodec: 'hvc1.2.4.L120.90', hdr: 'PQ', frameRate: 24, bandwidth: 3200000,
+    };
+    const player: ShakaPlayerLike = {
+      getAudioTracks: () => [],
+      getTextTracks: () => [],
+      getVariantTracks: () => [track],
+      selectAudioTrack: vi.fn(),
+      selectTextTrack: vi.fn(),
+      destroy: vi.fn(),
+    };
+    expect(createShakaEngine(player).streamInfo()?.bitrate).toBe(3200000);
   });
 });

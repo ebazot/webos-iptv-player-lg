@@ -25,6 +25,9 @@
   .epg-offset-badge > * + * { margin-left: 5px; }
   .osd-channel > * + * { margin-left: 16px; }
   .osd-stream-info > * + * { margin-left: 8px; }
+  .osd-tech > * + * { margin-top: 12px; }
+  .osd-tech-section > * + * { margin-top: 4px; }
+  .osd-tech-row > * + * { margin-left: 16px; }
   .osd-programme-detail > * + * { margin-left: 16px; }
   .osd-programme-time > * + * { margin-left: 16px; }
   .osd-progress-row > * + * { margin-left: 12px; }

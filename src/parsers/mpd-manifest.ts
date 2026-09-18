@@ -595,6 +595,7 @@ export function parseMpd(
         atmos,
         videoRange: range || dvRange(codecs),
         frameRate: frameRate(attr(set, rep, 'frameRate')),
+        bandwidth: parseInt(attr(set, rep, 'bandwidth') || '0', 10) || 0,
       });
     }
   }

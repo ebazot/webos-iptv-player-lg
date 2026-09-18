@@ -1,9 +1,10 @@
 import type { AudioTrackOption, SubtitleTrackOption } from '../types';
+import { extFromUrl } from './url';
 import { t } from '../i18n';
 
 export type StreamVariant = {
   width: number; height: number; videoCodec: string; audioCodec: string;
-  atmos: boolean; videoRange: string; frameRate: number;
+  atmos: boolean; videoRange: string; frameRate: number; bandwidth: number;
 };
 export type ResolutionBadge = { label: string; tier: 'uhd' | 'fhd' | 'hd' | 'sd' };
 
@@ -104,6 +105,7 @@ export function parseVariants(manifest: string): StreamVariant[] {
     const aud = line.match(/AUDIO="([^"]*)"/i);
     const fps = line.match(/FRAME-RATE=([\d.]+)/i);
     const range = line.match(/VIDEO-RANGE=([A-Za-z]+)/i);
+    const bw = line.match(/BANDWIDTH=(\d+)/i);
     let videoCodec = '';
     let audioCodec = '';
     if (cod) {
@@ -121,6 +123,7 @@ export function parseVariants(manifest: string): StreamVariant[] {
       atmos: (chan ? /\bJOC\b/i.test(chan[1]) : false) || (aud ? atmosGroups.has(aud[1]) : false),
       videoRange: range ? range[1] : '',
       frameRate: fps ? parseFloat(fps[1]) : 0,
+      bandwidth: bw ? parseInt(bw[1], 10) : 0,
     });
   }
   return variants;
@@ -151,4 +154,52 @@ export function subtitleSummary(tracks: SubtitleTrackOption[]): string {
   const active = tracks.find(t => t.active);
   const base = active ? (active.label || t('settings.on')) : t('common.off');
   return tracks.length > 1 ? `${base} (${tracks.length})` : base;
+}
+
+// Nominal variant bitrate → label (HLS BANDWIDTH / DASH bandwidth, or the MSE
+// engine's live level). 0/unknown → '' (caller omits).
+export function bitrateLabel(bps: number): string {
+  if (bps <= 0) return '';
+  if (bps >= 1_000_000) {
+    const mbps = bps / 1_000_000;
+    const value = mbps >= 10 ? Math.round(mbps) : Math.round(mbps * 10) / 10;
+    return `${value} Mbps`;
+  }
+  return `${Math.round(bps / 1000)} kbps`;
+}
+
+// Audio CHANNELS count → layout label ("6" → "5.1", "16" → "7.1.4"). Strips a
+// trailing "/JOC" (Atmos joint-object coding, surfaced separately as Atmos).
+// Unknown count → ''.
+const CHANNEL_LAYOUTS: Record<number, string> = {
+  1: '1.0', 2: '2.0', 3: '2.1', 4: '4.0', 5: '5.0', 6: '5.1',
+  7: '6.1', 8: '7.1', 10: '5.1.2', 12: '7.1.2', 16: '7.1.4',
+};
+
+export function channelLayoutLabel(channels: string): string {
+  const count = parseInt(channels.replace(/\/.*$/, ''), 10);
+  return Number.isFinite(count) ? CHANNEL_LAYOUTS[count] ?? '' : '';
+}
+
+// Stream URL extension → container/format label for the OSD. Unknown → ''.
+export function containerLabel(url: string): string {
+  switch (extFromUrl(url)) {
+    case 'm3u8': return 'HLS';
+    case 'mpd': return 'DASH';
+    case 'ts': return 'MPEG-TS';
+    case 'mp4': case 'm4v': return 'MP4';
+    case 'mkv': return 'MKV';
+    case 'webm': return 'WebM';
+    case 'mov': return 'MOV';
+    case 'avi': return 'AVI';
+    default: return '';
+  }
+}
+
+// Exact frame rate for the technical readout (two decimals when fractional,
+// e.g. 23.976 → "23.98"). 0/unknown → ''.
+export function frameRateExact(fps: number): string {
+  if (fps <= 0) return '';
+  const rounded = Math.round(fps * 100) / 100;
+  return String(Number.isInteger(rounded) ? Math.round(fps) : rounded);
 }

@@ -600,6 +600,7 @@ describe('PlayerPipeline desktop DASH', () => {
       frameRate: 24,
       audioChannels: '6',
       audioAtmos: false,
+      bitrate: 0,
     });
   });
 

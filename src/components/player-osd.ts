@@ -5,7 +5,7 @@ import { type DvrState } from '../utils/dvr';
 import { morph } from '../utils/morph';
 import { formatDuration, formatPosition, formatTime, getProgress } from '../utils/time';
 import { t, tp } from '../i18n';
-import { PAUSE_ICON, PLAY_ICON, RESYNC_ICON } from './icons';
+import { INFO_ICON, PAUSE_ICON, PLAY_ICON, RESYNC_ICON } from './icons';
 
 export interface PlayerOsdSnapshot {
   playback: {
@@ -36,6 +36,19 @@ export interface PlayerOsdStreamInfo {
   audioCodec: string;
   audio: string;
   subtitle: string;
+  // Technical readout — the first three also surface as ambient pills; the rest
+  // feeds the expandable details tray (see renderTechDetails).
+  container: string;
+  bitrate: string;
+  channels: string;
+  size: string;
+  videoToken: string;
+  audioToken: string;
+  fpsExact: string;
+  audioLang: string;
+  bufferedSeconds: number;
+  droppedFrames: number;
+  url: string;
 }
 
 export interface PlayerOsdOptions {
@@ -60,6 +73,8 @@ export class PlayerOsd {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private pointerX: number | null = null;
   private pointerY: number | null = null;
+  // Whether the technical-details tray under the programme block is expanded.
+  private techOpen = false;
   // Programme-icon URLs that failed to load, so a re-render omits them instead of
   // re-requesting a broken image (which would thrash the OSD layout).
   private failedIcons = new Set<string>();
@@ -119,6 +134,7 @@ export class PlayerOsd {
 
   hide(): void {
     this.visible = false;
+    this.techOpen = false;
     const osd = $('#player-osd', this.container);
     if (osd) hide(osd);
     if (this.timer) clearTimeout(this.timer);
@@ -127,6 +143,26 @@ export class PlayerOsd {
 
   toggle(): void {
     if (this.visible) this.hide(); else this.show();
+  }
+
+  techDetailsOpen(): boolean {
+    return this.techOpen;
+  }
+
+  /** Expand/collapse the technical-details tray (info button, Yellow button). */
+  toggleTechDetails(): void {
+    this.techOpen = !this.techOpen;
+    if (this.visible) {
+      this.render();
+      this.resetTimer();
+    }
+  }
+
+  /** Back while the tray is open collapses it instead of leaving the player. */
+  closeTechDetails(): void {
+    if (!this.techOpen) return;
+    this.techOpen = false;
+    if (this.visible) this.render();
   }
 
   resetTimer(): void {
@@ -246,8 +282,10 @@ export class PlayerOsd {
           : ''}
         <div class="osd-channel-name">${state.channel.name}</div>
         ${this.renderStreamInfo(state.streamInfo)}
+        ${this.infoButton()}
       </div>
       ${programmeHtml}
+      ${this.techOpen ? this.renderTechDetails(state) : ''}
     `);
   }
 
@@ -339,6 +377,7 @@ export class PlayerOsd {
       <div class="osd-channel">
         <div class="osd-channel-name">${state.vodTitle ?? ''}</div>
         ${this.renderStreamInfo(state.streamInfo)}
+        ${this.infoButton()}
       </div>
       <div class="osd-progress-row">
         ${this.playPauseButton(playback?.paused ?? false)}
@@ -349,6 +388,7 @@ export class PlayerOsd {
         <span class="osd-time-end">${dur > 0 ? formatPosition(dur) : ''}</span>
         ${this.resyncButton()}
       </div>
+      ${this.techOpen ? this.renderTechDetails(state) : ''}
     `);
   }
 
@@ -397,8 +437,8 @@ export class PlayerOsd {
     `;
   }
 
-  // The stream-info badges (resolution / HDR / DRM / fps / codecs / audio / subtitle),
-  // shared by the Live and VOD OSD.
+  // The stream-info badges (resolution / HDR / DRM / fps / codecs / bitrate /
+  // channels / audio / subtitle), shared by the Live and VOD OSD.
   private renderStreamInfo(info: PlayerOsdStreamInfo | null): Safe | string {
     if (!info) return '';
     return html`
@@ -409,14 +449,87 @@ export class PlayerOsd {
             }</span>`
           : ''}
         ${info.hdr ? html`<span class="si-badge si-badge--hdr">${info.hdr}</span>` : ''}
-        ${info.drm ? html`<span class="si-pill">${info.drm}</span>` : ''}
+        ${info.container ? html`<span class="si-pill">${info.container}</span>` : ''}
+        ${info.bitrate ? html`<span class="si-pill">${info.bitrate}</span>` : ''}
         ${info.fps ? html`<span class="si-pill">${info.fps}fps</span>` : ''}
         ${info.videoCodec ? html`<span class="si-pill">${info.videoCodec}</span>` : ''}
         ${info.audioCodec ? html`<span class="si-pill">${info.audioCodec}</span>` : ''}
+        ${info.channels ? html`<span class="si-pill">${info.channels}</span>` : ''}
+        ${info.drm ? html`<span class="si-pill">${info.drm}</span>` : ''}
         ${info.audio ? html`<span class="si-text">${audioTrackText(info.audio)}</span>` : ''}
         ${info.subtitle ? html`<span class="si-text">${t('player.subtitlesTrack', { name: info.subtitle })}</span>` : ''}
       </div>
     `;
+  }
+
+  /** The ⓘ button that toggles the technical-details tray (Yellow too). */
+  private infoButton(): Safe {
+    return html`
+      <button class="osd-info-btn${this.techOpen ? ' is-open' : ''}" data-tech-info
+        aria-label="${t('player.techDetails')}">${raw(INFO_ICON)}</button>
+    `;
+  }
+
+  /** The expandable technical-details tray: key/value rows, grouped. Omitted
+   *  values drop their row, and an empty group drops its heading. */
+  private renderTechDetails(state: PlayerOsdSnapshot): Safe {
+    const info = state.streamInfo;
+    const codecCell = (name: string, token: string): string =>
+      name && token && name.toLowerCase() !== token.toLowerCase()
+        ? `${name} (${token})`
+        : name || token;
+    const audio = info?.audio
+      ? (info.audioLang ? `${info.audio} · ${info.audioLang}` : info.audio)
+      : '';
+    return html`
+      <div class="osd-tech">
+        ${this.techSection('stream', t('player.info.stream'), [
+          this.techRow('container', t('player.info.container'), info?.container ?? ''),
+          this.techRow('bitrate', t('player.info.bitrate'), info?.bitrate ?? ''),
+          this.techRow('drm', t('player.info.drm'), info?.drm ?? ''),
+          this.techRow('url', t('player.info.source'), info?.url ?? ''),
+        ])}
+        ${this.techSection('video', t('player.info.video'), [
+          this.techRow('size', t('player.info.resolution'), info?.size ?? ''),
+          this.techRow('fps', t('player.info.frameRate'), info?.fpsExact ?? ''),
+          this.techRow('vcodec', t('player.info.videoCodec'),
+            codecCell(info?.videoCodec ?? '', info?.videoToken ?? '')),
+          this.techRow('range', t('player.info.videoRange'), info?.hdr ?? ''),
+        ])}
+        ${this.techSection('audio', t('player.info.audio'), [
+          this.techRow('acodec', t('player.info.audioCodec'),
+            codecCell(info?.audioCodec ?? '', info?.audioToken ?? '')),
+          this.techRow('channels', t('player.info.channels'), info?.channels ?? ''),
+          this.techRow('track', t('player.info.audioTrack'), audio),
+          this.techRow('subs', t('player.info.subtitles'), info?.subtitle ?? ''),
+        ])}
+        ${this.techSection('playback', t('player.info.playback'), [
+          this.techRow('buffered', t('player.info.buffered'), info && info.bufferedSeconds > 0
+            ? t('player.info.seconds', { count: info.bufferedSeconds })
+            : ''),
+          this.techRow('dropped', t('player.info.droppedFrames'), info && info.droppedFrames > 0
+            ? String(info.droppedFrames)
+            : ''),
+        ])}
+      </div>
+    `;
+  }
+
+  private techRow(key: string, label: string, value: string): Safe | string {
+    if (!value) return '';
+    return html`<div class="osd-tech-row" data-key="tech:${key}">
+      <span class="osd-tech-label">${label}</span>
+      <span class="osd-tech-value">${value}</span>
+    </div>`;
+  }
+
+  private techSection(key: string, title: string, rows: (Safe | string)[]): Safe | string {
+    const content = rows.filter(row => row !== '');
+    if (!content.length) return '';
+    return html`<div class="osd-tech-section" data-key="tech-section:${key}">
+      <div class="osd-tech-heading">${title}</div>
+      ${content}
+    </div>`;
   }
 
   private setProgress(fraction: number): void {
@@ -438,6 +551,7 @@ export class PlayerOsd {
     if (this.hitsControl('[data-playpause]', x, y)) this.callbacks.onPauseToggle();
     else if (this.hitsControl('[data-golive]', x, y)) this.callbacks.onGoLive();
     else if (this.hitsControl('[data-resync]', x, y)) this.callbacks.onResync();
+    else if (this.hitsControl('[data-tech-info]', x, y)) this.toggleTechDetails();
   }
 
   private hitsControl(selector: string, x: number, y: number): boolean {

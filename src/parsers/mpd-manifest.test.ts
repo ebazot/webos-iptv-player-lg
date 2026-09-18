@@ -338,9 +338,9 @@ describe('parseMpd', () => {
       </AdaptationSet></Period>`));
     expect(r.variants).toEqual([
       { width: 1920, height: 1080, videoCodec: 'avc1.640028', audioCodec: 'mp4a.40.2',
-        atmos: false, videoRange: '', frameRate: 30000 / 1001 },
+        atmos: false, videoRange: '', frameRate: 30000 / 1001, bandwidth: 0 },
       { width: 1280, height: 720, videoCodec: 'avc1.4d401f', audioCodec: 'mp4a.40.2',
-        atmos: false, videoRange: '', frameRate: 25 },
+        atmos: false, videoRange: '', frameRate: 25, bandwidth: 0 },
     ]);
   });
 
@@ -352,8 +352,16 @@ describe('parseMpd', () => {
       </AdaptationSet></Period>`));
     expect(r.variants).toEqual([
       { width: 3840, height: 2160, videoCodec: 'hvc1.2.4.L153.B0', audioCodec: '',
-        atmos: false, videoRange: '', frameRate: 50 },
+        atmos: false, videoRange: '', frameRate: 50, bandwidth: 0 },
     ]);
+  });
+
+  it('reads the Representation bandwidth into the variant', () => {
+    const r = parseMpd(mpd(`<Period>
+      <AdaptationSet contentType="video" mimeType="video/mp4">
+        <Representation id="v1" width="1280" height="720" codecs="avc1.4d401f" bandwidth="2800000"/>
+      </AdaptationSet></Period>`));
+    expect(r.variants[0].bandwidth).toBe(2800000);
   });
 
   it('reads HDR from a CICP transfer-characteristics descriptor', () => {

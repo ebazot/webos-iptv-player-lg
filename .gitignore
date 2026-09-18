@@ -3,6 +3,7 @@ dist/
 *.ipk
 *.manifest.json
 .DS_Store
+.history/
 
 # Test artifacts
 test-output/

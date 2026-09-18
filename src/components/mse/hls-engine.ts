@@ -31,6 +31,7 @@ export function createHlsEngine(hls: HlsInstance): MseEngine {
         videoRange: level?.videoRange ?? '',
         frameRate: level?.frameRate ?? 0,
         audioChannels: hls.audioTracks?.[hls.audioTrack]?.channels ?? '',
+        bitrate: level?.bitrate ?? 0,
       };
     },
     destroy(): void {

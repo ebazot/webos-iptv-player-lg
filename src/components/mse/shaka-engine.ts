@@ -21,6 +21,7 @@ interface ShakaTextTrack {
 interface ShakaVariantTrack {
   active: boolean;
   audioCodec: string | null;
+  bandwidth?: number | null;
   channelsCount: number | null;
   frameRate: number | null;
   hdr: string | null;
@@ -84,6 +85,7 @@ export function createShakaEngine(player: ShakaPlayerLike): MseEngine {
         frameRate: active.frameRate || 0,
         audioChannels: active.channelsCount ? String(active.channelsCount) : '',
         audioAtmos: active.spatialAudio === true && active.audioCodec?.trim().toLowerCase().split('.')[0] === 'ec-3',
+        bitrate: active.bandwidth ?? 0,
       };
     },
     destroy(): void | Promise<void> {

@@ -160,6 +160,78 @@
   color: var(--text-secondary);
 }
 
+/* ⓘ — toggles the technical-details tray (the remote's Yellow button too). */
+.osd-info-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--overlay-chip);
+  border-radius: 4px;
+  background: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.osd-info-btn svg {
+  width: 20px;
+  height: 20px;
+  display: block;
+}
+
+.osd-info-btn.is-open,
+.osd-info-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* Technical-details tray — grouped key/value rows under the programme block.
+   The tray is a snapshot at render time; values refresh on the next re-render. */
+.osd-tech {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.osd-tech-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.osd-tech-heading {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 2px;
+}
+
+.osd-tech-row {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  font-size: 20px;
+  line-height: 1.35;
+}
+
+.osd-tech-label {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.osd-tech-value {
+  /* Beats the generated `.osd-tech-row > * + *` margin fallback (linked first). */
+  margin-left: auto;
+  min-width: 0;
+  text-align: right;
+  color: var(--text-primary);
+  word-break: break-word;
+}
+
 .osd-programme {
   margin-top: 4px;
 }

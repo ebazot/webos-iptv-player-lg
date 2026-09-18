@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { describe, it, expect } from 'vitest';
 import type { AudioTrackOption, SubtitleTrackOption } from '../types';
-import { resolutionBadge, hdrLabel, hdrFromTransfer, frameRateLabel, parseVariants, pickVariant, codecName, audioSummary, subtitleSummary } from './stream-info';
+import { resolutionBadge, hdrLabel, hdrFromTransfer, frameRateLabel, frameRateExact, parseVariants, pickVariant, codecName, bitrateLabel, channelLayoutLabel, containerLabel, audioSummary, subtitleSummary } from './stream-info';
 
 const a = (over: Partial<AudioTrackOption>): AudioTrackOption => ({ index: 0, label: '', active: false, ...over });
 const s = (over: Partial<SubtitleTrackOption>): SubtitleTrackOption => ({ index: 0, label: '', active: false, ...over });
@@ -67,14 +67,14 @@ describe('parseVariants', () => {
   it('parses resolution and classifies codecs into video/audio', () => {
     const v = parseVariants(MASTER);
     expect(v).toEqual([
-      { width: 1920, height: 1080, videoCodec: 'avc1.640028', audioCodec: 'mp4a.40.2', atmos: false, videoRange: '', frameRate: 30 },
-      { width: 3840, height: 2160, videoCodec: 'hvc1.1.6.L150', audioCodec: 'ec-3', atmos: false, videoRange: 'PQ', frameRate: 59.94 },
-      { width: 0, height: 0, videoCodec: '', audioCodec: '', atmos: false, videoRange: '', frameRate: 0 },
+      { width: 1920, height: 1080, videoCodec: 'avc1.640028', audioCodec: 'mp4a.40.2', atmos: false, videoRange: '', frameRate: 30, bandwidth: 5000000 },
+      { width: 3840, height: 2160, videoCodec: 'hvc1.1.6.L150', audioCodec: 'ec-3', atmos: false, videoRange: 'PQ', frameRate: 59.94, bandwidth: 9000000 },
+      { width: 0, height: 0, videoCodec: '', audioCodec: '', atmos: false, videoRange: '', frameRate: 0, bandwidth: 800000 },
     ]);
   });
   it('classifies codecs by prefix regardless of order', () => {
     const m = ['#EXTM3U', '#EXT-X-STREAM-INF:RESOLUTION=1280x720,CODECS="mp4a.40.2,avc1.42c00d"', 'v.m3u8'].join('\n');
-    expect(parseVariants(m)).toEqual([{ width: 1280, height: 720, videoCodec: 'avc1.42c00d', audioCodec: 'mp4a.40.2', atmos: false, videoRange: '', frameRate: 0 }]);
+    expect(parseVariants(m)).toEqual([{ width: 1280, height: 720, videoCodec: 'avc1.42c00d', audioCodec: 'mp4a.40.2', atmos: false, videoRange: '', frameRate: 0, bandwidth: 0 }]);
   });
   it('flags Dolby Atmos from an inline CHANNELS JOC marker', () => {
     const m = [
@@ -160,5 +160,65 @@ describe('subtitleSummary', () => {
     expect(subtitleSummary([s({ label: 'Track 1' })])).toBe('Off');
     expect(subtitleSummary([s({ label: 'Track 1', active: true })])).toBe('Track 1');
     expect(subtitleSummary([s({ label: 'Track 1', active: true }), s({ index: 1, label: 'Track 2' })])).toBe('Track 1 (2)');
+  });
+});
+
+describe('bitrateLabel', () => {
+  it('formats Mbps with one decimal below 10, none above', () => {
+    expect(bitrateLabel(3_200_000)).toBe('3.2 Mbps');
+    expect(bitrateLabel(9_950_000)).toBe('10 Mbps');
+    expect(bitrateLabel(48_000_000)).toBe('48 Mbps');
+  });
+  it('formats kbps below 1 Mbps', () => {
+    expect(bitrateLabel(845_000)).toBe('845 kbps');
+    expect(bitrateLabel(800_000)).toBe('800 kbps');
+  });
+  it('returns "" for 0 or negative', () => {
+    expect(bitrateLabel(0)).toBe('');
+    expect(bitrateLabel(-1)).toBe('');
+  });
+});
+
+describe('channelLayoutLabel', () => {
+  it('maps common channel counts to layouts', () => {
+    expect(channelLayoutLabel('2')).toBe('2.0');
+    expect(channelLayoutLabel('6')).toBe('5.1');
+    expect(channelLayoutLabel('8')).toBe('7.1');
+    expect(channelLayoutLabel('16')).toBe('7.1.4');
+  });
+  it('strips a trailing /JOC marker', () => {
+    expect(channelLayoutLabel('16/JOC')).toBe('7.1.4');
+    expect(channelLayoutLabel('6/JOC')).toBe('5.1');
+  });
+  it('returns "" for unknown or empty', () => {
+    expect(channelLayoutLabel('')).toBe('');
+    expect(channelLayoutLabel('5')).toBe('');
+    expect(channelLayoutLabel('JOC')).toBe('');
+  });
+});
+
+describe('containerLabel', () => {
+  it('maps known stream extensions', () => {
+    expect(containerLabel('http://host/a.m3u8')).toBe('HLS');
+    expect(containerLabel('http://host/a.mpd?token=x')).toBe('DASH');
+    expect(containerLabel('http://host/live/ch1.ts')).toBe('MPEG-TS');
+    expect(containerLabel('http://host/a.mp4')).toBe('MP4');
+    expect(containerLabel('http://host/a.mkv')).toBe('MKV');
+  });
+  it('returns "" for unknown or extension-less URLs', () => {
+    expect(containerLabel('http://host/a')).toBe('');
+    expect(containerLabel('')).toBe('');
+  });
+});
+
+describe('frameRateExact', () => {
+  it('keeps fractional rates to two decimals and whole rates bare', () => {
+    expect(frameRateExact(59.94)).toBe('59.94');
+    expect(frameRateExact(30000 / 1001)).toBe('29.97');
+    expect(frameRateExact(25)).toBe('25');
+    expect(frameRateExact(30)).toBe('30');
+  });
+  it('returns "" for 0', () => {
+    expect(frameRateExact(0)).toBe('');
   });
 });

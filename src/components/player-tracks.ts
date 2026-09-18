@@ -465,6 +465,11 @@ export class PlayerTracks {
     }));
   }
 
+  /** The playing audio track's language, for the OSD's technical readout. */
+  activeAudioLang(): string {
+    return this.displayAudioOptions().find(option => option.active)?.lang ?? '';
+  }
+
   /** Switch the active audio track and remember it for this channel. No-op for a
    *  grayed (unavailable) track — webOS can't switch to a collapsed rendition. */
   selectAudioTrack(index: number): void {

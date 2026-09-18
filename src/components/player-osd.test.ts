@@ -131,6 +131,17 @@ describe('PlayerOsd', () => {
         audioCodec: 'Codec 2',
         audio: 'Track 1',
         subtitle: 'Track 2',
+        container: 'HLS',
+        bitrate: '',
+        channels: '',
+        size: '',
+        videoToken: '',
+        audioToken: '',
+        fpsExact: '',
+        audioLang: '',
+        bufferedSeconds: 0,
+        droppedFrames: 0,
+        url: '',
       },
     });
     osd.show();
@@ -298,5 +309,96 @@ describe('PlayerOsd', () => {
     osd.clearFailedIcons();
     osd.render();
     expect(container.querySelector('.osd-programme-icon')).not.toBeNull();
+  });
+
+  const TECH_INFO = {
+    resolution: { tier: 'fhd' as const, label: '1080p' },
+    hdr: '',
+    drm: 'PlayReady',
+    fps: '25',
+    videoCodec: 'H.264',
+    audioCodec: 'AAC',
+    audio: 'Track 1',
+    subtitle: 'Off',
+    container: 'HLS',
+    bitrate: '3.2 Mbps',
+    channels: '5.1',
+    size: '1920×1080',
+    videoToken: 'avc1.640028',
+    audioToken: 'mp4a.40.2',
+    fpsExact: '25',
+    audioLang: 'l1',
+    bufferedSeconds: 12,
+    droppedFrames: 0,
+    url: 'http://host/live/a',
+  };
+
+  it('shows technical pills and toggles the details tray from the info button', () => {
+    state = snapshot({
+      playback: playback(120),
+      vodTitle: 'Video 1',
+      streamInfo: TECH_INFO,
+    });
+    osd.show();
+
+    const pills = container.querySelector('.osd-stream-info');
+    expect(pills?.textContent).toContain('HLS');
+    expect(pills?.textContent).toContain('3.2 Mbps');
+    expect(pills?.textContent).toContain('5.1');
+    expect(container.querySelector('.osd-tech')).toBeNull();
+
+    // A click over the ⓘ button opens the tray with the grouped readout. Only the
+    // info button has geometry; every other control's rect is empty so the click
+    // can't be eaten by the seek bar or the play/pause button.
+    const original = HTMLElement.prototype.getBoundingClientRect;
+    HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement): DOMRect {
+      return this.hasAttribute('data-tech-info') ? rect(600, 10, 30, 30) : rect(0, 0, 0, 0);
+    };
+    try {
+      container.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: 610, clientY: 20 }));
+    } finally {
+      HTMLElement.prototype.getBoundingClientRect = original;
+    }
+    expect(container.querySelector('.osd-tech')).not.toBeNull();
+    const tray = container.querySelector('.osd-tech')!;
+    expect(tray.querySelector('[data-key="tech:container"]')?.textContent).toContain('HLS');
+    expect(tray.querySelector('[data-key="tech:drm"]')?.textContent).toContain('PlayReady');
+    expect(tray.querySelector('[data-key="tech:size"]')?.textContent).toContain('1920×1080');
+    expect(tray.querySelector('[data-key="tech:vcodec"]')?.textContent).toContain('H.264 (avc1.640028)');
+    expect(tray.querySelector('[data-key="tech:channels"]')?.textContent).toContain('5.1');
+    expect(tray.querySelector('[data-key="tech:buffered"]')?.textContent).toContain('12');
+    // Zero/unknown values drop their row: no dropped frames, no HDR range.
+    expect(tray.querySelector('[data-key="tech:dropped"]')).toBeNull();
+    expect(tray.querySelector('[data-key="tech:range"]')).toBeNull();
+    expect(container.querySelector('[data-key="tech-section:playback"]')).not.toBeNull();
+    expect(container.querySelector('[data-key="tech-section:video"]')).not.toBeNull();
+
+    // The same click toggles it closed again.
+    HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement): DOMRect {
+      return this.hasAttribute('data-tech-info') ? rect(600, 10, 30, 30) : rect(0, 0, 0, 0);
+    };
+    try {
+      container.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: 610, clientY: 20 }));
+    } finally {
+      HTMLElement.prototype.getBoundingClientRect = original;
+    }
+    expect(container.querySelector('.osd-tech')).toBeNull();
+  });
+
+  it('keeps a closed tray closed across shows and collapses it via Back-style close', () => {
+    state = snapshot({ playback: playback(120), vodTitle: 'Video 1', streamInfo: TECH_INFO });
+    osd.show();
+    expect(container.querySelector('.osd-tech')).toBeNull();
+
+    osd.toggleTechDetails();
+    expect(container.querySelector('.osd-tech')).not.toBeNull();
+    osd.closeTechDetails();
+    expect(container.querySelector('.osd-tech')).toBeNull();
+
+    osd.toggleTechDetails();
+    osd.hide();
+    osd.show();
+    expect(container.querySelector('.osd-tech')).toBeNull();
+    expect(container.querySelector('[data-tech-info]')?.classList.contains('is-open')).toBe(false);
   });
 });

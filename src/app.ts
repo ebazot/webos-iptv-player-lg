@@ -1076,7 +1076,7 @@ class App {
       return;
     }
     if (action === 'yellow' && currentView === 'player') {
-      this.player.showOSD();
+      this.player.toggleTechInfo();
       return;
     }
 
@@ -1261,7 +1261,7 @@ class App {
     if (action === 'green') {
       this.togglePlayingFavorite();
     } else if (action === 'yellow') {
-      this.player.showOSD();
+      this.player.toggleTechInfo();
     } else {
       this.handleKey(action);
     }
