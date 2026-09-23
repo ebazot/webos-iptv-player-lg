@@ -460,6 +460,8 @@ describe('PlayerPipeline HLS integration', () => {
       videoRange: 'PQ',
       frameRate: 30,
       audioChannels: '2',
+      bitrate: 0,
+      realtimeBitrate: undefined,
     });
   });
 });
@@ -893,6 +895,7 @@ describe('PlayerPipeline manifest loading', () => {
         atmos: false,
         videoRange: '',
         frameRate: 30,
+        bandwidth: 1,
       }],
       masterUrl: 'http://host/a',
     });

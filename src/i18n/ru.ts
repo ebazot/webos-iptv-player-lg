@@ -166,6 +166,7 @@ export const RU_MESSAGES = {
   'player.info.source': 'Источник',
   'player.info.drm': 'DRM',
   'player.info.bitrate': 'Битрейт',
+  'player.info.realtimeBitrate': 'Битрейт в реальном времени',
   'player.info.video': 'Видео',
   'player.info.resolution': 'Разрешение',
   'player.info.frameRate': 'Частота кадров',

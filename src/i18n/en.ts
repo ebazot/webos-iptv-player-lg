@@ -163,6 +163,7 @@ export const EN_MESSAGES = {
   'player.info.source': 'Source',
   'player.info.drm': 'DRM',
   'player.info.bitrate': 'Bitrate',
+  'player.info.realtimeBitrate': 'Real-time bitrate',
   'player.info.video': 'Video',
   'player.info.resolution': 'Resolution',
   'player.info.frameRate': 'Frame rate',

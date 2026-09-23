@@ -8,6 +8,7 @@ export interface PipelineStreamInfo {
   audioChannels: string;
   audioAtmos?: boolean;
   bitrate: number;
+  realtimeBitrate?: number;
 }
 
 // The desktop preview plays through an MSE library — hls.js or Shaka — which

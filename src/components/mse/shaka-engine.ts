@@ -29,10 +29,16 @@ interface ShakaVariantTrack {
   spatialAudio?: boolean;
 }
 
+export interface ShakaStats {
+  estimatedBandwidth?: number;
+  streamBandwidth?: number;
+}
+
 export interface ShakaPlayerLike {
   getAudioTracks(): ShakaAudioTrack[];
   getTextTracks(): ShakaTextTrack[];
   getVariantTracks(): ShakaVariantTrack[];
+  getStats?(): ShakaStats;
   selectAudioTrack(track: ShakaAudioTrack): void;
   selectTextTrack(track?: ShakaTextTrack | null): void;
   destroy(): void | Promise<void>;
@@ -78,6 +84,10 @@ export function createShakaEngine(player: ShakaPlayerLike): MseEngine {
     streamInfo(): PipelineStreamInfo | null {
       const active = player.getVariantTracks().find(track => track.active);
       if (!active) return null;
+      const stats = typeof player.getStats === 'function' ? player.getStats() : null;
+      const realtimeBitrate = stats && Number.isFinite(stats.estimatedBandwidth) && (stats.estimatedBandwidth ?? 0) > 0
+        ? stats.estimatedBandwidth!
+        : undefined;
       return {
         videoCodec: active.videoCodec || '',
         audioCodec: active.audioCodec || '',
@@ -86,6 +96,7 @@ export function createShakaEngine(player: ShakaPlayerLike): MseEngine {
         audioChannels: active.channelsCount ? String(active.channelsCount) : '',
         audioAtmos: active.spatialAudio === true && active.audioCodec?.trim().toLowerCase().split('.')[0] === 'ec-3',
         bitrate: active.bandwidth ?? 0,
+        realtimeBitrate,
       };
     },
     destroy(): void | Promise<void> {

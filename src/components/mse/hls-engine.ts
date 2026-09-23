@@ -25,6 +25,9 @@ export function createHlsEngine(hls: HlsInstance): MseEngine {
     },
     streamInfo(): PipelineStreamInfo | null {
       const level = hls.loadLevelObj;
+      const realtimeBitrate = Number.isFinite(hls.bandwidthEstimate) && hls.bandwidthEstimate > 0
+        ? hls.bandwidthEstimate
+        : undefined;
       return {
         videoCodec: level?.videoCodec ?? '',
         audioCodec: level?.audioCodec ?? '',
@@ -32,6 +35,7 @@ export function createHlsEngine(hls: HlsInstance): MseEngine {
         frameRate: level?.frameRate ?? 0,
         audioChannels: hls.audioTracks?.[hls.audioTrack]?.channels ?? '',
         bitrate: level?.bitrate ?? 0,
+        realtimeBitrate,
       };
     },
     destroy(): void {

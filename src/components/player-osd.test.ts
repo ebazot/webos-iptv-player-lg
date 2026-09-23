@@ -322,6 +322,7 @@ describe('PlayerOsd', () => {
     subtitle: 'Off',
     container: 'HLS',
     bitrate: '3.2 Mbps',
+    realtimeBitrate: '',
     channels: '5.1',
     size: '1920×1080',
     videoToken: 'avc1.640028',
@@ -383,6 +384,27 @@ describe('PlayerOsd', () => {
       HTMLElement.prototype.getBoundingClientRect = original;
     }
     expect(container.querySelector('.osd-tech')).toBeNull();
+  });
+
+  it('displays real-time bitrate pill and technical tray row when available', () => {
+    state = snapshot({
+      playback: playback(120),
+      vodTitle: 'Video 1',
+      streamInfo: {
+        ...TECH_INFO,
+        bitrate: '3.2 Mbps',
+        realtimeBitrate: '4.8 Mbps',
+      },
+    });
+    osd.show();
+
+    const pills = container.querySelector('.osd-stream-info');
+    expect(pills?.textContent).toContain('4.8 Mbps');
+
+    osd.toggleTechDetails();
+    const tray = container.querySelector('.osd-tech')!;
+    expect(tray.querySelector('[data-key="tech:bitrate"]')?.textContent).toContain('3.2 Mbps');
+    expect(tray.querySelector('[data-key="tech:realtimeBitrate"]')?.textContent).toContain('4.8 Mbps');
   });
 
   it('keeps a closed tray closed across shows and collapses it via Back-style close', () => {
