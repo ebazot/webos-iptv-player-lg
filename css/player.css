@@ -322,6 +322,10 @@
   transition: width 1s linear;
 }
 
+.osd-progress-bar.is-greyed {
+  background: var(--overlay-chip);
+}
+
 .osd-progress[data-seekbar] {
   cursor: pointer;
   height: 36px;

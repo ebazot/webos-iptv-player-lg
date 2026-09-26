@@ -689,10 +689,7 @@ export class Player {
         else this.osd.toggle();
         break;
       case 'left':
-        this.seekBy(-CONFIG.PLAYER.SEEK_STEP);
-        break;
       case 'right':
-        this.seekBy(CONFIG.PLAYER.SEEK_STEP);
         break;
       case 'play':
         if (this.videoEl?.paused) this.pauseToggle();
@@ -1560,10 +1557,7 @@ export class Player {
         else this.osd.toggle();
         break;
       case 'left':
-        this.seekBy(-CONFIG.PLAYER.SEEK_STEP);
-        break;
       case 'right':
-        this.seekBy(CONFIG.PLAYER.SEEK_STEP);
         break;
       case 'up':
       case 'channel_up':

@@ -221,7 +221,7 @@ export class PlayerOsd {
           ${catchup.description ? html`<div class="osd-description">${catchup.description}</div>` : ''}
         </div>
       `;
-    } else if (state.nowPlaying || state.dvr) {
+    } else {
       // Live playback. Show EPG programme info, and a DVR timeshift bar when the
       // stream exposes a usable seekable window.
       const nowPlaying = state.nowPlaying;
@@ -248,7 +248,7 @@ export class PlayerOsd {
         </div>
       ` : '';
       const progressRow = state.dvr
-        ? this.dvrProgressRow(state.dvr, state.playback?.paused ?? false)
+        ? this.dvrProgressRow(state.dvr, state.playback?.paused ?? false, nowPlaying)
         : nowPlaying ? html`
           <div class="osd-progress-row">
             <span class="osd-time-current">${formatTime(new Date())}</span>
@@ -258,7 +258,15 @@ export class PlayerOsd {
             </div>
             <span class="osd-time-end">${formatTime(nowPlaying.stop)}</span>
           </div>
-        ` : '';
+        ` : html`
+          <div class="osd-progress-row">
+            <span class="osd-time-current">${formatTime(new Date())}</span>
+            <div class="osd-progress">
+              <div class="osd-progress-bar is-greyed" style="width: 0%"></div>
+            </div>
+            <span class="osd-time-end"></span>
+          </div>
+        `;
       programmeHtml = html`
         <div class="osd-programme">
           <div class="osd-now-label">${t(state.dvr && !state.dvr.atLiveEdge
@@ -325,7 +333,11 @@ export class PlayerOsd {
       return;
     }
     if (state.dvr) {
-      this.setProgress(state.dvr.fraction);
+      if (state.nowPlaying) {
+        this.setProgress(getProgress(state.nowPlaying.start, state.nowPlaying.stop));
+      } else {
+        this.setProgress(0);
+      }
       const behind = $('.osd-dvr-behind', this.container);
       if (behind) {
         behind.textContent = state.dvr.atLiveEdge
@@ -334,6 +346,12 @@ export class PlayerOsd {
       }
       const live = $('.osd-dvr-live', this.container) as HTMLElement | null;
       if (live) live.classList.toggle('is-live', state.dvr.atLiveEdge);
+      return;
+    }
+    if (state.nowPlaying) {
+      this.setProgress(getProgress(state.nowPlaying.start, state.nowPlaying.stop));
+      const current = $('.osd-time-current', this.container);
+      if (current) current.textContent = formatTime(new Date());
       return;
     }
     if (!state.catchup || !Number.isFinite(playback.duration) || playback.duration <= 0) return;
@@ -425,7 +443,9 @@ export class PlayerOsd {
     `;
   }
 
-  private dvrProgressRow(state: DvrState, paused: boolean): Safe {
+  private dvrProgressRow(state: DvrState, paused: boolean, nowPlaying: Programme | null): Safe {
+    const progress = nowPlaying ? getProgress(nowPlaying.start, nowPlaying.stop) : 0;
+    const barClass = nowPlaying ? 'osd-progress-bar' : 'osd-progress-bar is-greyed';
     return html`
       <div class="osd-progress-row osd-dvr-row">
         ${this.playPauseButton(paused)}
@@ -433,7 +453,7 @@ export class PlayerOsd {
           ? t('common.live')
           : `-${formatPosition(state.behindLive)}`}</span>
         <div class="osd-progress" data-seekbar>
-          <div class="osd-progress-bar" style="width: ${state.fraction * 100}%"></div>
+          <div class="${barClass}" style="width: ${progress * 100}%"></div>
         </div>
         <button class="osd-time-end osd-dvr-live ${state.atLiveEdge ? 'is-live' : ''}"
           data-golive aria-label="${t('player.goLive')}">${t('common.live')}</button>
@@ -456,6 +476,7 @@ export class PlayerOsd {
         ${info.container ? html`<span class="si-pill">${info.container}</span>` : ''}
         ${info.bitrate ? html`<span class="si-pill">${info.bitrate}</span>` : ''}
         ${info.fps ? html`<span class="si-pill">${info.fps}fps</span>` : ''}
+        ${info.bufferedSeconds > 0 ? html`<span class="si-pill">${t('player.info.seconds', { count: info.bufferedSeconds })} buf</span>` : ''}
         ${info.videoCodec ? html`<span class="si-pill">${info.videoCodec}</span>` : ''}
         ${info.audioCodec ? html`<span class="si-pill">${info.audioCodec}</span>` : ''}
         ${info.channels ? html`<span class="si-pill">${info.channels}</span>` : ''}
