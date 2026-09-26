@@ -14,6 +14,7 @@ import { getCachedEpg, setCachedEpg } from './idb-cache';
 import type { CachedEpgFilter } from './idb-cache';
 import { ChannelCustomizationService } from './channel-customization';
 import { channelKey } from '../utils/channel';
+import { StorageService } from './storage-service';
 
 const log = createLogger('EPG');
 
@@ -50,6 +51,11 @@ interface PreparedEpgMappingSearchEntry {
   fields: string[];
 }
 
+function sourceAppliesToChannel(source: EpgSource, channel: Channel): boolean {
+  return (source.kind === 'manual' && source.playlistIds.length === 0)
+    || source.playlistIds.some((id) => channel.playlistIds.includes(id));
+}
+
 class EpgServiceImpl {
   channels: Record<string, EpgChannel> = {};
   programmes: Record<string, Programme[]> = {};
@@ -66,12 +72,24 @@ class EpgServiceImpl {
   private playlistChannels: Channel[] | null = null;
   /** The per-source filter the last completed load was built from. */
   private appliedFilters = new Map<string, SourceFilter | null>();
-  private pendingWork: Promise<void> | null = null;
+  private pendingWork: Promise<unknown> | null = null;
   private revision = 0;
   private mappingRevisionValue = 0;
 
   get mappingRevision(): number {
     return this.mappingRevisionValue;
+  }
+
+  getNextRefreshDelayMs(intervalMs: number): number {
+    let nextDueAt = Number.POSITIVE_INFINITY;
+    for (const source of this.sources) {
+      const state = this.states.get(source.url);
+      if (!state || state.needsRefresh) return 0;
+      nextDueAt = Math.min(nextDueAt, state.timestamp + intervalMs);
+    }
+    return nextDueAt === Number.POSITIVE_INFINITY
+      ? intervalMs
+      : Math.max(0, nextDueAt - Date.now());
   }
 
   /**
@@ -113,8 +131,8 @@ class EpgServiceImpl {
     channels?: Channel[],
   ): Promise<void> {
     this.playlistChannels = channels ?? null;
-    this.mappedChannelIds = this.collectMappedChannelIds();
     this.setSources(sources);
+    this.mappedChannelIds = this.collectMappedChannelIds();
     this.appliedFilters = new Map(this.sources.map((source) =>
       [source.url, this.filterFor(source)] as const));
     const revision = ++this.revision;
@@ -145,16 +163,16 @@ class EpgServiceImpl {
    * queue here. Each body re-reads its own preconditions when it finally
    * runs, so work the entry ahead of it already did is skipped, not repeated.
    */
-  private enqueue(run: () => Promise<void>): Promise<void> {
+  private enqueue<T>(run: () => Promise<T>): Promise<T> {
     const previous = this.pendingWork;
     const task = (async () => {
       if (previous) await previous.catch(() => undefined);
-      await run();
+      return run();
     })();
     this.pendingWork = task;
     return (async () => {
       try {
-        await task;
+        return await task;
       } finally {
         if (this.pendingWork === task) this.pendingWork = null;
       }
@@ -168,8 +186,8 @@ class EpgServiceImpl {
   ): Promise<void> {
     const previousSources = this.sources;
     this.playlistChannels = channels ?? null;
-    this.mappedChannelIds = this.collectMappedChannelIds();
     this.setSources(sources);
+    this.mappedChannelIds = this.collectMappedChannelIds();
     const filters = new Map(this.sources.map((source) =>
       [source.url, this.filterFor(source)] as const));
     // Entering and leaving channel edit mode rebuilds the channel array to
@@ -189,26 +207,32 @@ class EpgServiceImpl {
     this.publish(revision);
   }
 
-  refresh(onDataPublished?: () => void): Promise<void> {
-    return this.enqueue(() => this.runRefresh(onDataPublished));
+  refresh(onDataPublished?: () => void, force = false): Promise<boolean> {
+    return this.enqueue(() => this.runRefresh(onDataPublished, force));
   }
 
-  private async runRefresh(onDataPublished?: () => void): Promise<void> {
+  private async runRefresh(
+    onDataPublished?: () => void,
+    force = false,
+  ): Promise<boolean> {
+    const refreshIntervalMs = StorageService.getEpgRefreshIntervalMs();
     const sourcesToRefresh = this.sources.filter((source) => {
       const state = this.states.get(source.url);
-      return !state || state.needsRefresh
-        || Date.now() - state.timestamp >= CONFIG.EPG_REFRESH_INTERVAL;
+      return force || !state || state.needsRefresh
+        || (refreshIntervalMs !== null
+          && Date.now() - state.timestamp >= refreshIntervalMs);
     });
-    if (!sourcesToRefresh.length) return;
+    if (!sourcesToRefresh.length) return true;
 
     const revision = ++this.revision;
     this.mappedChannelIds = this.collectMappedChannelIds();
-    await Promise.all(sourcesToRefresh.map(source =>
+    const refreshed = await Promise.all(sourcesToRefresh.map(source =>
       this.fetchSource(source, this.filterFor(source), revision, onDataPublished)));
-    if (revision !== this.revision) return;
+    if (revision !== this.revision) return false;
     this.rebuildIndexes();
     this.loaded = this.sources.length > 0;
     this.mappingRevisionValue++;
+    return refreshed.every(Boolean);
   }
 
   getNowPlaying(channelId: string): Programme | null {
@@ -262,10 +286,11 @@ class EpgServiceImpl {
   private findBaseChannelId(channel: Channel, override: ChannelOverride | null): string | null {
     if (!this.sources.length) return this.findLegacyChannelId(channel);
     if (override?.epgChannelId && this.channels[override.epgChannelId]) {
-      return override.epgChannelId;
+      const mapped = this.splitChannelKey(override.epgChannelId);
+      const source = mapped && this.sources.find(item => item.url === mapped.url);
+      if (source && sourceAppliesToChannel(source, channel)) return override.epgChannelId;
     }
-    const candidates = this.sources.filter((source) =>
-      source.kind === 'manual' || source.playlistIds.some((id) => channel.playlistIds.includes(id)));
+    const candidates = this.sources.filter(source => sourceAppliesToChannel(source, channel));
 
     for (const source of candidates) {
       if (!channel.id) continue;
@@ -337,9 +362,7 @@ class EpgServiceImpl {
 
   getMappingSearchEntries(channel: Channel): EpgMappingSearchEntry[] {
     const entries: EpgMappingSearchEntry[] = [];
-    const sources = this.sources.filter((source) =>
-      source.kind === 'manual'
-      || source.playlistIds.some((id) => channel.playlistIds.includes(id)));
+    const sources = this.sources.filter(source => sourceAppliesToChannel(source, channel));
     for (let sourceIndex = 0; sourceIndex < sources.length; sourceIndex++) {
       const source = sources[sourceIndex];
       const state = this.states.get(source.url);
@@ -426,8 +449,15 @@ class EpgServiceImpl {
       if (!source.url) continue;
       const existing = merged.find((item) => item.url === source.url);
       if (existing) {
-        for (const id of source.playlistIds) {
-          if (!existing.playlistIds.includes(id)) existing.playlistIds.push(id);
+        const globalManual =
+          (existing.kind === 'manual' && existing.playlistIds.length === 0)
+          || (source.kind === 'manual' && source.playlistIds.length === 0);
+        if (globalManual) {
+          existing.playlistIds = [];
+        } else {
+          for (const id of source.playlistIds) {
+            if (!existing.playlistIds.includes(id)) existing.playlistIds.push(id);
+          }
         }
         if (source.kind === 'manual') existing.kind = 'manual';
         if (source.offsetMinutes !== undefined) existing.offsetMinutes = source.offsetMinutes;
@@ -476,6 +506,7 @@ class EpgServiceImpl {
     const cached = await getCachedEpg(source.url);
     if (revision !== this.revision || !cached) return 'missing';
     const age = Date.now() - cached.timestamp;
+    const refreshIntervalMs = StorageService.getEpgRefreshIntervalMs();
     const hasTzField = 'tzOffsetMinutes' in cached.data;
     const hasChannelCatalog = !cached.filter
       || cached.data.channelCatalogComplete === true;
@@ -486,7 +517,7 @@ class EpgServiceImpl {
       timestamp: cached.timestamp,
       needsRefresh: !hasTzField || !hasChannelCatalog || !covered,
     });
-    const fresh = age < CONFIG.EPG_REFRESH_INTERVAL
+    const fresh = (refreshIntervalMs === null || age < refreshIntervalMs)
       && hasTzField
       && hasChannelCatalog
       && covered;
@@ -496,6 +527,7 @@ class EpgServiceImpl {
         filtered.data,
         serializeFilter(filter),
         cached.timestamp,
+        refreshIntervalMs,
       );
     }
     if (fresh) {
@@ -518,12 +550,12 @@ class EpgServiceImpl {
     filter = this.filterFor(source),
     revision = this.revision,
     onDataPublished?: () => void,
-  ): Promise<void> {
-    if (revision !== this.revision) return;
+  ): Promise<boolean> {
+    if (revision !== this.revision) return false;
     if (filter && isEmptyFilter(filter)) {
       this.states.delete(source.url);
       this.channelIdsByName.delete(source.url);
-      return;
+      return true;
     }
     const done = log.time(`fetch '${source.url}'`);
     try {
@@ -537,7 +569,7 @@ class EpgServiceImpl {
         : { maxProgrammes: CONFIG.EPG.MAX_RETAINED_PROGRAMMES });
       if (revision !== this.revision) {
         done();
-        return;
+        return false;
       }
       const programmeCount = stats.programmesKept;
       // An empty parse is usually a transient upstream response; neither cache
@@ -545,7 +577,7 @@ class EpgServiceImpl {
       if (programmeCount === 0 && this.hasProgrammes(source.url)) {
         log.warn('EPG has 0 programmes — keeping the previous data:', source.url);
         done();
-        return;
+        return false;
       }
       // A truncated parse is usable for this session, but it is not the
       // guide the filter asked for — so it must not settle as the answer.
@@ -569,14 +601,23 @@ class EpgServiceImpl {
           'hint=hide the channels you do not watch',
         );
       } else if (programmeCount > 0) {
-        await setCachedEpg(source.url, result, serializeFilter(filter));
+        await setCachedEpg(
+          source.url,
+          result,
+          serializeFilter(filter),
+          Date.now(),
+          StorageService.getEpgRefreshIntervalMs(),
+        );
       } else {
         log.warn('EPG has 0 programmes — not caching:', source.url);
       }
+      done();
+      return !truncated;
     } catch (err) {
       log.error('Failed to load EPG:', source.url, err);
+      done();
+      return false;
     }
-    done();
   }
 
   private hasProgrammes(url: string): boolean {
@@ -618,9 +659,19 @@ class EpgServiceImpl {
     // Nothing mapped is the common case, and it costs one sparse walk; only
     // a playlist that actually carries mappings pays for the key set.
     if (this.playlistChannels === null || !mapped.length) return mapped;
-    const eligible = new Set<string>();
-    for (const channel of this.playlistChannels) eligible.add(channelKey(channel));
-    return ChannelCustomizationService.epgChannelIdsFor(eligible);
+    const eligibleMappings = new Set<string>();
+    for (const source of this.sources) {
+      const eligibleChannels = new Set<string>();
+      for (const channel of this.playlistChannels) {
+        if (sourceAppliesToChannel(source, channel)) {
+          eligibleChannels.add(channelKey(channel));
+        }
+      }
+      for (const id of ChannelCustomizationService.epgChannelIdsFor(eligibleChannels)) {
+        if (this.splitChannelKey(id)?.url === source.url) eligibleMappings.add(id);
+      }
+    }
+    return [...eligibleMappings];
   }
 
   /**
@@ -637,8 +688,7 @@ class EpgServiceImpl {
       if (mapped?.url === source.url) ids.add(mapped.id);
     }
     for (const channel of this.playlistChannels) {
-      if (source.kind !== 'manual'
-        && !channel.playlistIds.some((id) => source.playlistIds.includes(id))) continue;
+      if (!sourceAppliesToChannel(source, channel)) continue;
       if (channel.id) ids.add(channel.id);
       // A rename keeps the source name, and findChannelId matches either one.
       if (channel.name) names.add(channel.name.toLowerCase());

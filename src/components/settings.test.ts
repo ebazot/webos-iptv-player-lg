@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import type { ChannelCycleMode, TzMode } from '../types';
+import type { ChannelCycleMode, ManualEpgSource, TzMode } from '../types';
+import type { AnimationMode } from '../services/motion-service';
 import type { XtreamAccountInfo } from '../services/xtream-client';
 
 const {
@@ -13,6 +14,7 @@ const {
   uploadMock,
   xtreamMock,
   healthMock,
+  motionMock,
 } = vi.hoisted(() => {
   const state = {
     playlists: [] as {
@@ -24,13 +26,21 @@ const {
       count?: number;
       xtream?: { username: string; password: string };
     }[],
-    epg: '',
+    manualEpgSources: [] as ManualEpgSource[],
     autoPlay: false,
+    livePreview: false,
+    animationMode: 'reduced' as AnimationMode,
     theme: 'midnight' as string,
     overlayStyle: 'dark' as string,
     textSize: '100' as string,
     tzMode: 'device' as TzMode,
     channelCycleMode: 'global' as ChannelCycleMode,
+    liveReconnectAttempts: 3,
+    numberEntryOsdTimeoutMs: 1200,
+    playerOsdTimeoutMs: 5000,
+    playlistRefreshHours: 6,
+    epgRefreshHours: 6,
+    xtreamCatalogRefreshHours: 6,
     showHidden: false,
     tzOffset: null as number | null,
     epgOffsets: {} as Record<string, number>,
@@ -60,16 +70,32 @@ const {
         quotaBytes: null,
       })),
     },
-    themeMock: { previewTheme: vi.fn(), applyTheme: vi.fn(), initTheme: vi.fn(), applyTextSize: vi.fn() },
+    themeMock: { previewTheme: vi.fn(), applyTheme: vi.fn(), initTheme: vi.fn(), applyTextSize: vi.fn()     },
+    motionMock: {
+      applyAnimationMode: vi.fn(),
+    },
     storageMock: {
       getPlaylists: vi.fn(() => state.playlists),
-      getEpgUrl: vi.fn(() => state.epg),
+      getManualEpgSources: vi.fn(() => state.manualEpgSources.map(source => ({
+        ...source,
+        playlistIds: source.playlistIds.slice(),
+      }))),
       getAutoPlay: vi.fn(() => state.autoPlay),
+      getLivePreview: vi.fn(() => state.livePreview),
+      getAnimationMode: vi.fn(() => state.animationMode),
       getTheme: vi.fn(() => state.theme),
       getOverlayStyle: vi.fn(() => state.overlayStyle),
       getTextSize: vi.fn(() => state.textSize),
       getTzMode: vi.fn(() => state.tzMode),
       getChannelCycleMode: vi.fn(() => state.channelCycleMode),
+      getLiveReconnectAttempts: vi.fn(() => state.liveReconnectAttempts),
+      getNumberEntryOsdTimeoutMs: vi.fn(() => state.numberEntryOsdTimeoutMs),
+      getPlayerOsdTimeoutMs: vi.fn(() => state.playerOsdTimeoutMs),
+      getPlaylistRefreshIntervalHours: vi.fn(() => state.playlistRefreshHours),
+      getEpgRefreshIntervalHours: vi.fn(() => state.epgRefreshHours),
+      getXtreamCatalogRefreshIntervalHours: vi.fn(
+        () => state.xtreamCatalogRefreshHours,
+      ),
       getEpgTzOffset: vi.fn(() => state.tzOffset),
       getEpgOffsets: vi.fn(() => ({ ...state.epgOffsets })),
       getLocalePreference: vi.fn(() => state.locale),
@@ -81,13 +107,39 @@ const {
       setChannelCustomization: vi.fn(),
       clearChannelCustomization: vi.fn(),
       setPlaylists: vi.fn(),
-      setEpgUrl: vi.fn(),
+      setManualEpgSources: vi.fn((sources: ManualEpgSource[]) => {
+        state.manualEpgSources = sources.map(source => ({
+          ...source,
+          playlistIds: source.playlistIds.slice(),
+        }));
+        return true;
+      }),
       setAutoPlay: vi.fn(),
+      setLivePreview: vi.fn((value: boolean) => { state.livePreview = value; }),
+      setAnimationMode: vi.fn((value: AnimationMode) => { state.animationMode = value; }),
       setTheme: vi.fn((id: string) => { state.theme = id; }),
       setOverlayStyle: vi.fn((s: string) => { state.overlayStyle = s; }),
       setTextSize: vi.fn((s: string) => { state.textSize = s; }),
       setTzMode: vi.fn(),
       setChannelCycleMode: vi.fn((m: ChannelCycleMode) => { state.channelCycleMode = m; }),
+      setLiveReconnectAttempts: vi.fn((attempts: number) => {
+        state.liveReconnectAttempts = attempts;
+      }),
+      setNumberEntryOsdTimeoutMs: vi.fn((timeout: number) => {
+        state.numberEntryOsdTimeoutMs = timeout;
+      }),
+      setPlayerOsdTimeoutMs: vi.fn((timeout: number) => {
+        state.playerOsdTimeoutMs = timeout;
+      }),
+      setPlaylistRefreshIntervalHours: vi.fn((hours: number) => {
+        state.playlistRefreshHours = hours;
+      }),
+      setEpgRefreshIntervalHours: vi.fn((hours: number) => {
+        state.epgRefreshHours = hours;
+      }),
+      setXtreamCatalogRefreshIntervalHours: vi.fn((hours: number) => {
+        state.xtreamCatalogRefreshHours = hours;
+      }),
       setEpgOffsets: vi.fn((offsets: Record<string, number>) => {
         state.epgOffsets = { ...offsets };
       }),
@@ -133,8 +185,19 @@ const {
   };
 });
 
-vi.mock('../services/storage-service', () => ({ StorageService: storageMock }));
+vi.mock('../services/storage-service', () => ({
+  NUMBER_ENTRY_OSD_TIMEOUT_MS_OPTIONS: [1200, 1800, 2500, 3000, 3500],
+  LIVE_RECONNECT_ATTEMPT_OPTIONS: [0, 1, 2, 3, 4, 5],
+  PLAYER_OSD_TIMEOUT_MS_OPTIONS: [3000, 5000, 8000, 10000, 12000],
+  REFRESH_INTERVAL_HOUR_OPTIONS: [0, 1, 3, 6, 12, 24],
+  XTREAM_CATALOG_REFRESH_HOUR_OPTIONS: [1, 3, 6, 12, 24],
+  StorageService: storageMock,
+}));
 vi.mock('../services/theme-service', () => themeMock);
+vi.mock('../services/motion-service', () => ({
+  ANIMATION_MODES: ['essential', 'reduced', 'full'],
+  applyAnimationMode: motionMock.applyAnimationMode,
+}));
 vi.mock('../services/idb-cache', () => cacheMock);
 vi.mock('./toast', () => ({ showToast: toastMock.showToast }));
 vi.mock('../services/xtream-client', () => ({
@@ -171,11 +234,19 @@ let settings: Settings;
 beforeEach(() => {
   Element.prototype.scrollIntoView = vi.fn();
   state.playlists = [];
-  state.epg = '';
+  state.manualEpgSources = [];
   state.autoPlay = false;
+  state.livePreview = false;
+  state.animationMode = 'reduced';
   state.theme = 'midnight';
   state.overlayStyle = 'dark';
   state.textSize = '100';
+  state.liveReconnectAttempts = 3;
+  state.numberEntryOsdTimeoutMs = 1200;
+  state.playerOsdTimeoutMs = 5000;
+  state.playlistRefreshHours = 6;
+  state.epgRefreshHours = 6;
+  state.xtreamCatalogRefreshHours = 6;
   state.epgOffsets = {};
   PlaylistService.epgSources = [];
   PlaylistService.allChannels = [];
@@ -213,8 +284,15 @@ describe('Settings.render', () => {
       'Appearance',
       'Playback',
       'Online Subtitles',
+      'Advanced',
       'Data Management',
     ]);
+    const navOrder = Array.from(container.querySelectorAll<HTMLElement>('.settings-nav-item'))
+      .map(item => item.dataset.settingsTarget);
+    const contentOrder = Array.from(
+      container.querySelectorAll<HTMLElement>('.settings-scroll > .settings-category'),
+    ).map(item => item.dataset.settingsCategory);
+    expect(contentOrder).toEqual(navOrder);
     expect(container.querySelector('.settings-nav-item.active')?.getAttribute('data-settings-target'))
       .toBe('general');
     expect(container.querySelector('.settings-nav-help')?.textContent)
@@ -350,7 +428,7 @@ describe('Settings.render', () => {
   });
 
   it('places the EPG source dropdown and offset buttons in one control row', () => {
-    state.epg = 'http://host/epg.xml';
+    state.manualEpgSources = [{ url: 'http://host/epg.xml', playlistIds: [] }];
     settings.render();
 
     const controls = container.querySelector('.epg-offset-controls')!;
@@ -360,13 +438,14 @@ describe('Settings.render', () => {
 
   it('renders a row per configured playlist with its values', () => {
     state.playlists = [{ name: 'P1', url: 'http://a' }, { name: 'P2', url: 'http://b' }];
-    state.epg = 'http://epg';
+    state.manualEpgSources = [{ url: 'http://epg', playlistIds: [] }];
     settings.render();
     const names = Array.from(container.querySelectorAll<HTMLInputElement>('.playlist-name'));
     const urls = Array.from(container.querySelectorAll<HTMLInputElement>('.playlist-url'));
     expect(names.map(n => n.value)).toEqual(['P1', 'P2']);
     expect(urls.map(u => u.value)).toEqual(['http://a', 'http://b']);
-    expect(container.querySelector<HTMLInputElement>('#epg-url')!.value).toBe('http://epg');
+    expect(container.querySelector<HTMLInputElement>('.manual-epg-url')!.value)
+      .toBe('http://epg');
   });
 
   it('persists a disabled M3U source without deleting it', () => {
@@ -388,6 +467,104 @@ describe('Settings.render', () => {
     state.autoPlay = true;
     settings.render();
     expect(container.querySelector('#auto-play .toggle-option.active')!.getAttribute('data-value')).toBe('on');
+  });
+
+  it('renders animation, reconnect, and refresh controls under Advanced', () => {
+    settings.render();
+    const advanced = container.querySelector('#settings-advanced')!;
+    expect(advanced.querySelector('.settings-section-title')?.textContent).toBe('Advanced');
+    const items = advanced.querySelectorAll('.settings-advanced-row');
+    expect(items).toHaveLength(6);
+    expect(Array.from(advanced.querySelectorAll('.settings-advanced-group'))
+      .map(group => group.textContent?.trim())
+      .filter(Boolean))
+      .toEqual(['Interface', 'Playback', 'On-screen display', 'Background refresh']);
+    expect(items[0].querySelector('.settings-item-title')?.textContent)
+      .toBe('Animation mode');
+    expect(items[0].querySelector('.settings-advanced-control')?.children)
+      .toHaveLength(1);
+    expect(Array.from(container.querySelectorAll<HTMLElement>(
+      '#animation-mode .toggle-option',
+    )).map(option => option.dataset.value))
+      .toEqual(['essential', 'reduced', 'full']);
+    expect(container.querySelector('#animation-mode .toggle-option.active')
+      ?.getAttribute('data-value')).toBe('reduced');
+    expect(items[1].querySelector('.settings-item-title')?.textContent)
+      .toBe('Live reconnect attempts');
+    expect(items[1].querySelector('.settings-advanced-control')?.children).toHaveLength(1);
+    expect(container.querySelector('#live-reconnect-attempts')?.getAttribute('data-value'))
+      .toBe('3');
+    expect(Array.from(container.querySelectorAll<HTMLElement>(
+      '#live-reconnect-attempts [data-dropdown-value]',
+    )).map(option => option.dataset.dropdownValue))
+      .toEqual(['0', '1', '2', '3', '4', '5']);
+    expect(items[2].querySelector('.settings-item-title')?.textContent)
+      .toBe('Number Entry OSD timeout');
+    expect(container.querySelector('#number-entry-osd-timeout')?.getAttribute('data-value'))
+      .toBe('1200');
+    expect(Array.from(container.querySelectorAll<HTMLElement>(
+      '#number-entry-osd-timeout [data-dropdown-value]',
+    )).map(option => option.textContent))
+      .toEqual(['1.2 seconds', '1.8 seconds', '2.5 seconds', '3 seconds', '3.5 seconds']);
+    expect(items[3].querySelector('.settings-item-title')?.textContent)
+      .toBe('Player OSD auto-hide delay');
+    expect(container.querySelector('#player-osd-timeout')?.getAttribute('data-value'))
+      .toBe('5000');
+    expect(Array.from(container.querySelectorAll<HTMLElement>(
+      '#player-osd-timeout [data-dropdown-value]',
+    )).map(option => option.textContent))
+      .toEqual(['3 seconds', '5 seconds', '8 seconds', '10 seconds', '12 seconds']);
+    expect(container.querySelector('#playlist-refresh-interval')
+      ?.getAttribute('data-value')).toBe('6');
+    expect(container.querySelector('#epg-refresh-interval')
+      ?.getAttribute('data-value')).toBe('6');
+    expect(Array.from(container.querySelectorAll<HTMLElement>(
+      '#playlist-refresh-interval [data-dropdown-value]',
+    )).map(option => option.dataset.dropdownValue))
+      .toEqual(['0', '1', '3', '6', '12', '24']);
+    expect(Array.from(container.querySelectorAll<HTMLElement>(
+      '#playlist-refresh-interval [data-dropdown-value]',
+    )).map(option => option.textContent))
+      .toEqual(['Off', '1 hour', '3 hours', '6 hours', '12 hours', '24 hours']);
+    expect(container.querySelector('#xtream-catalog-refresh-interval')).toBeNull();
+  });
+
+  it('shows the Xtream catalog refresh interval only for an enabled account', () => {
+    state.playlists = [{
+      id: 'x1',
+      name: 'Account',
+      url: 'http://host',
+      source: 'xtream',
+      xtream: { username: 'u', password: 'p' },
+    }];
+
+    settings.render();
+
+    expect(container.querySelectorAll('#settings-advanced .settings-advanced-row'))
+      .toHaveLength(7);
+    expect(container.querySelector('#xtream-catalog-refresh-interval')
+      ?.getAttribute('data-value')).toBe('6');
+    expect(Array.from(container.querySelectorAll<HTMLElement>(
+      '#xtream-catalog-refresh-interval [data-dropdown-value]',
+    )).map(option => option.dataset.dropdownValue))
+      .toEqual(['1', '3', '6', '12', '24']);
+  });
+
+  it('persists and applies the selected animation mode', () => {
+    settings.render();
+    click('#animation-mode [data-value="full"]');
+    click('#save-settings');
+    expect(storageMock.setAnimationMode).toHaveBeenCalledWith('full');
+    expect(motionMock.applyAnimationMode).toHaveBeenCalledWith('full');
+  });
+
+  it('persists the selected number entry and player OSD timeouts', () => {
+    settings.render();
+    click('#number-entry-osd-timeout [data-dropdown-value="1800"]');
+    click('#player-osd-timeout [data-dropdown-value="8000"]');
+    click('#save-settings');
+    expect(storageMock.setNumberEntryOsdTimeoutMs).toHaveBeenCalledWith(1800);
+    expect(storageMock.setPlayerOsdTimeoutMs).toHaveBeenCalledWith(8000);
   });
 
   // Left moves within a row by measuring peers, and a collapsed control has no
@@ -419,8 +596,25 @@ describe('Settings.render', () => {
     expect(container.querySelector('.settings-nav-item.focused')).not.toBeNull();
   });
 
+  it('shows and restores the empty hint for manual EPG sources', () => {
+    settings.render();
+
+    const entries = container.querySelector('.manual-epg-sources')!;
+    expect(entries.querySelector('.empty-hint')?.textContent)
+      .toBe('No EPG sources added yet');
+
+    click('#add-epg-source');
+    expect(entries.querySelector('.empty-hint')).toBeNull();
+    expect(entries.querySelectorAll('[data-manual-epg-source]')).toHaveLength(1);
+
+    click('.remove-epg-source');
+    expect(entries.querySelector('[data-manual-epg-source]')).toBeNull();
+    expect(entries.querySelector('.empty-hint')?.textContent)
+      .toBe('No EPG sources added yet');
+  });
+
   it('adjusts and resets a manual EPG source offset with remote actions', () => {
-    state.epg = 'http://host/epg.xml';
+    state.manualEpgSources = [{ url: 'http://host/epg.xml', playlistIds: [] }];
     settings.render();
 
     const plus = container.querySelector<HTMLElement>('[data-offset-delta="15"]')!;
@@ -449,11 +643,11 @@ describe('Settings.render', () => {
   });
 
   it('rebinds time correction when the manual XMLTV URL is edited', () => {
-    state.epg = 'http://host/old.xml';
+    state.manualEpgSources = [{ url: 'http://host/old.xml', playlistIds: [] }];
     state.epgOffsets = { 'http://host/old.xml': 30 };
     settings.render();
 
-    const input = container.querySelector<HTMLInputElement>('#epg-url')!;
+    const input = container.querySelector<HTMLInputElement>('.manual-epg-url')!;
     input.value = 'http://host/new.xml';
     input.dispatchEvent(new Event('input', { bubbles: true }));
 
@@ -465,6 +659,119 @@ describe('Settings.render', () => {
     expect(storageMock.setEpgOffsets).toHaveBeenCalledWith({
       'http://host/new.xml': 15,
     });
+  });
+
+  it('orders manual EPG sources and binds each one to selected playlists', () => {
+    state.playlists = [
+      { id: 'p1', name: 'Alpha', url: 'http://host/a' },
+      { id: 'p2', name: 'Bravo', url: 'http://host/b' },
+    ];
+    state.manualEpgSources = [
+      { url: 'http://host/a.xml', playlistIds: ['p1'] },
+      { url: 'http://host/b.xml', playlistIds: [] },
+    ];
+    settings.render();
+
+    const rows = container.querySelectorAll<HTMLElement>('[data-manual-epg-source]');
+    expect(rows).toHaveLength(2);
+    expect(rows[0].querySelector('[data-scope-all]')?.textContent?.trim())
+      .toBe('All playlists');
+    expect(rows[0].querySelector('[data-playlist-id="p1"]')?.classList)
+      .toContain('active');
+    expect(rows[0].querySelector('[data-scope-all]')?.classList)
+      .not.toContain('active');
+    expect(rows[1].querySelector('[data-scope-all]')?.classList)
+      .toContain('active');
+    expect(rows[0].querySelector<HTMLButtonElement>('.move-epg-earlier')?.disabled)
+      .toBe(true);
+    expect(rows[0].querySelector('.move-epg-earlier')?.hasAttribute('data-focusable'))
+      .toBe(false);
+    expect(rows[1].querySelector<HTMLButtonElement>('.move-epg-later')?.disabled)
+      .toBe(true);
+    expect(rows[1].querySelector('.move-epg-later')?.hasAttribute('data-focusable'))
+      .toBe(false);
+
+    rows[1].querySelector<HTMLElement>('[data-playlist-id="p2"]')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    const moveEarlier = rows[1].querySelector<HTMLElement>('.move-epg-earlier')!;
+    moveEarlier.dispatchEvent(new CustomEvent('nav:hover', { bubbles: true }));
+    moveEarlier.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    const reordered = container.querySelectorAll<HTMLElement>('[data-manual-epg-source]');
+    expect(reordered[0].querySelector<HTMLButtonElement>('.move-epg-earlier')?.disabled)
+      .toBe(true);
+    expect(reordered[0].querySelector('.move-epg-earlier')?.hasAttribute('data-focusable'))
+      .toBe(false);
+    expect(reordered[0].querySelector('.move-epg-later')?.hasAttribute('data-focusable'))
+      .toBe(true);
+    expect(reordered[0].querySelector('.manual-epg-url')?.classList)
+      .toContain('focused');
+    click('#save-settings');
+
+    expect(storageMock.setManualEpgSources).toHaveBeenCalledWith([
+      { url: 'http://host/b.xml', playlistIds: ['p2'] },
+      { url: 'http://host/a.xml', playlistIds: ['p1'] },
+    ]);
+    expect(onSave).toHaveBeenCalledWith('reload');
+  });
+
+  it('keeps manual EPG scopes synchronized with playlist edits', () => {
+    state.playlists = [
+      { id: 'p1', name: 'Alpha', url: 'http://host/a' },
+    ];
+    state.manualEpgSources = [
+      { url: 'http://host/a.xml', playlistIds: ['p1'] },
+    ];
+    settings.render();
+
+    click('#add-playlist');
+    const addedPlaylist = Array.from(
+      container.querySelectorAll<HTMLElement>(
+        '#playlist-entries .settings-row:not(.playlist-header-row)',
+      ),
+    ).at(-1)!;
+    const addedId = addedPlaylist.dataset.id!;
+    const name = addedPlaylist.querySelector<HTMLInputElement>('.playlist-name')!;
+    name.value = 'Bravo';
+    name.dispatchEvent(new Event('input', { bubbles: true }));
+
+    expect(container.querySelector(
+      `[data-manual-epg-source] [data-playlist-id="${addedId}"]`,
+    )?.textContent?.trim()).toBe('Bravo');
+
+    const originalPlaylist = container.querySelector<HTMLElement>(
+      '#playlist-entries .settings-row[data-id="p1"]',
+    )!;
+    originalPlaylist.querySelector<HTMLElement>('.remove-playlist')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+    const source = container.querySelector<HTMLElement>('[data-manual-epg-source]')!;
+    expect(source.querySelector('[data-playlist-id="p1"]')).toBeNull();
+    expect(source.querySelector('[data-scope-all]')?.classList).toContain('active');
+
+    click('#add-epg-source');
+    const addedSource = Array.from(
+      container.querySelectorAll<HTMLElement>('[data-manual-epg-source]'),
+    ).at(-1)!;
+    expect(addedSource.querySelector(`[data-playlist-id="${addedId}"]`)).not.toBeNull();
+  });
+
+  it('rejects duplicate manual EPG URLs before saving any settings', () => {
+    state.manualEpgSources = [
+      { url: 'http://host/a.xml', playlistIds: [] },
+      { url: 'http://host/b.xml', playlistIds: [] },
+    ];
+    settings.render();
+    const inputs = container.querySelectorAll<HTMLInputElement>('.manual-epg-url');
+    inputs[1].value = inputs[0].value;
+
+    click('#save-settings');
+
+    expect(storageMock.setPlaylists).not.toHaveBeenCalled();
+    expect(storageMock.setManualEpgSources).not.toHaveBeenCalled();
+    expect(toastMock.showToast).toHaveBeenCalledWith(
+      'Each EPG source must use a unique URL.',
+    );
+    expect(inputs[1].classList).toContain('focused');
   });
 
   it('does not assign a source to an ambiguous legacy channel key', () => {
@@ -1013,6 +1320,52 @@ describe('Settings.save', () => {
     settings.render();
   });
 
+  it('defaults live preview to Off under Playback with its help text', () => {
+    const item = container.querySelector('#live-preview-setting')!.closest('.settings-item')!;
+    expect(item.closest('[data-settings-category]')?.getAttribute('data-settings-category'))
+      .toBe('playback');
+    expect(item.querySelector('.settings-item-title')?.textContent).toBe('Live preview');
+    expect(item.querySelector('.settings-item-hint')?.textContent)
+      .toBe('Watch live channels in a small window while you browse.');
+    expect(item.querySelector('.toggle-option.active')?.getAttribute('data-value')).toBe('off');
+    expect(storageMock.setLivePreview).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('saves live preview from %s without reloading sources', (enabled) => {
+    state.playlists = [];
+    state.livePreview = enabled;
+    settings.render();
+    const activeValue = () => container.querySelector('#live-preview-setting .toggle-option.active')
+      ?.getAttribute('data-value');
+    expect(activeValue()).toBe(enabled ? 'on' : 'off');
+
+    click(`#live-preview-setting [data-value="${enabled ? 'off' : 'on'}"]`);
+    expect(activeValue()).toBe(enabled ? 'off' : 'on');
+    expect(state.livePreview).toBe(enabled);
+    expect(storageMock.setLivePreview).not.toHaveBeenCalled();
+
+    click('#save-settings');
+    expect(storageMock.setLivePreview).toHaveBeenCalledExactlyOnceWith(!enabled);
+    expect(state.livePreview).toBe(!enabled);
+    expect(onSave).toHaveBeenCalledWith('apply');
+    expect(storageMock.setAutoPlay).toHaveBeenCalledWith(false);
+    settings.render();
+    expect(activeValue()).toBe(enabled ? 'off' : 'on');
+  });
+
+  it.each([false, true])('discards an unsaved live preview change from %s on Cancel', (enabled) => {
+    state.livePreview = enabled;
+    settings.render();
+    click(`#live-preview-setting [data-value="${enabled ? 'off' : 'on'}"]`);
+    click('#cancel-settings');
+    expect(onSave).toHaveBeenCalledWith('cancel');
+    expect(storageMock.setLivePreview).not.toHaveBeenCalled();
+    expect(state.livePreview).toBe(enabled);
+    settings.render();
+    expect(container.querySelector('#live-preview-setting .toggle-option.active')?.getAttribute('data-value'))
+      .toBe(enabled ? 'on' : 'off');
+  });
+
   it('persists trimmed playlists, EPG and auto-play, then reloads', () => {
     const names = container.querySelectorAll<HTMLInputElement>('.playlist-name');
     const urls = container.querySelectorAll<HTMLInputElement>('.playlist-url');
@@ -1020,13 +1373,16 @@ describe('Settings.save', () => {
     urls[0].value = '  http://x  ';
     names[1].value = 'Unnamed';
     urls[1].value = '   '; // blank URL -> dropped
-    container.querySelector<HTMLInputElement>('#epg-url')!.value = ' http://epg ';
+    click('#add-epg-source');
+    container.querySelector<HTMLInputElement>('.manual-epg-url')!.value = ' http://epg ';
     click('#auto-play [data-value="on"]');
 
     click('#save-settings');
 
     expect(storageMock.setPlaylists).toHaveBeenCalledWith([{ id: expect.any(String), name: 'My', url: 'http://x', source: 'url' }]);
-    expect(storageMock.setEpgUrl).toHaveBeenCalledWith('http://epg');
+    expect(storageMock.setManualEpgSources).toHaveBeenCalledWith([
+      { url: 'http://epg', playlistIds: [] },
+    ]);
     expect(storageMock.setAutoPlay).toHaveBeenCalledWith(true);
     expect(onSave).toHaveBeenCalledWith('reload'); // playlist + EPG changed
   });
@@ -1059,6 +1415,47 @@ describe('Settings.save', () => {
     click('#save-settings');
     expect(storageMock.setLocalePreference).toHaveBeenCalledWith('zh-CN');
     expect(onSave).toHaveBeenCalledWith('apply');
+  });
+
+  it('saves reconnect attempts without forcing a full data reload', () => {
+    state.playlists = [];
+    settings.render();
+
+    click('#live-reconnect-attempts [data-dropdown-value="5"]');
+    click('#save-settings');
+
+    expect(storageMock.setLiveReconnectAttempts).toHaveBeenCalledWith(5);
+    expect(onSave).toHaveBeenCalledWith('apply');
+  });
+
+  it('saves playlist and guide refresh intervals without forcing a data reload', () => {
+    settings.render();
+
+    click('#playlist-refresh-interval [data-dropdown-value="12"]');
+    click('#epg-refresh-interval [data-dropdown-value="0"]');
+    state.playlists = [];
+    click('#save-settings');
+
+    expect(storageMock.setPlaylistRefreshIntervalHours).toHaveBeenCalledWith(12);
+    expect(storageMock.setEpgRefreshIntervalHours).toHaveBeenCalledWith(0);
+    expect(storageMock.setXtreamCatalogRefreshIntervalHours).not.toHaveBeenCalled();
+    expect(onSave).toHaveBeenCalledWith('apply');
+  });
+
+  it('saves the Xtream catalog refresh interval when the control is available', () => {
+    state.playlists = [{
+      id: 'x1',
+      name: 'Account',
+      url: 'http://host',
+      source: 'xtream',
+      xtream: { username: 'u', password: 'p' },
+    }];
+    settings.render();
+
+    click('#xtream-catalog-refresh-interval [data-dropdown-value="12"]');
+    click('#save-settings');
+
+    expect(storageMock.setXtreamCatalogRefreshIntervalHours).toHaveBeenCalledWith(12);
   });
 
   it('renders the Settings title in Simplified Chinese', () => {
@@ -1180,23 +1577,29 @@ describe('Settings.handleAction', () => {
 
   it('moves right from a category to its first control', () => {
     settings.render();
-    container.querySelector<HTMLElement>('[data-settings-target="appearance"]')!
+    const appearance = container.querySelector<HTMLElement>(
+      '[data-settings-target="appearance"]',
+    )!;
+    appearance
       .dispatchEvent(new CustomEvent('nav:hover', { bubbles: true }));
     settings.handleAction('right');
     expect(container.querySelector('.theme-swatch.focused')).not.toBeNull();
+    container.querySelector('.settings-scroll')!
+      .dispatchEvent(new Event('scroll', { bubbles: true }));
+    expect(appearance.classList.contains('active')).toBe(true);
   });
 
   it('moves left from a content boundary back to the active category', () => {
     settings.render();
     click('[data-settings-target="guide"]');
-    container.querySelector<HTMLElement>('#epg-url')!
+    container.querySelector<HTMLElement>('#add-epg-source')!
       .dispatchEvent(new CustomEvent('nav:hover', { bubbles: true }));
     settings.handleAction('left');
     expect(container.querySelector('[data-settings-target="guide"]')?.classList.contains('focused'))
       .toBe(true);
   });
 
-  it('scrolls to a category when its sidebar item is activated', () => {
+  it('leaves category scrolling to the selected CSS profile', () => {
     settings.render();
     const target = container.querySelector<HTMLElement>('#settings-subtitles')!;
     target.scrollIntoView = vi.fn();
@@ -1204,9 +1607,22 @@ describe('Settings.handleAction', () => {
     expect(target.scrollIntoView).toHaveBeenCalledWith({
       block: 'start',
       inline: 'nearest',
-      behavior: 'smooth',
+      behavior: 'auto',
     });
     expect(target.scrollIntoView).toHaveBeenCalledTimes(1);
+  });
+
+  it('still delegates category scrolling to CSS in full mode', () => {
+    state.animationMode = 'full';
+    settings.render();
+    const target = container.querySelector<HTMLElement>('#settings-subtitles')!;
+    target.scrollIntoView = vi.fn();
+    click('[data-settings-target="subtitles"]');
+    expect(target.scrollIntoView).toHaveBeenCalledWith({
+      block: 'start',
+      inline: 'nearest',
+      behavior: 'auto',
+    });
   });
 
   it('updates the weak active category when content scrolling reaches the bottom', async () => {

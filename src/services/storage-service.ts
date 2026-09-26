@@ -1,11 +1,16 @@
 import { CONFIG } from '../config';
 import { DEFAULT_THEME, DEFAULT_OVERLAY, DEFAULT_TEXT_SIZE, isValidTextSize, type OverlayStyle, type TextSize } from '../config/themes';
-import type { AudioPref, CatchupProgressEntry, Channel, ChannelCustomization, ChannelCycleMode, PlaylistEntry, RecentlyWatchedLiveEntry, Reminder, ResumeEntry, ResumeKind, SubtitlePref, TzMode, WatchlistEntry, WatchlistKind } from '../types';
+import type { AudioPref, CatchupProgressEntry, Channel, ChannelCustomization, ChannelCycleMode, ManualEpgSource, PlaylistEntry, RecentlyWatchedLiveEntry, Reminder, ResumeEntry, ResumeKind, SubtitlePref, TzMode, WatchlistEntry, WatchlistKind } from '../types';
 import type { OnlineSubtitleConfig, PickedOnlineSub } from './subtitle-search/types';
 import { channelKey, legacyChannelKey } from '../utils/channel';
 import { genPlaylistId } from '../utils/playlist';
 import { createLogger } from '../utils/logger';
 import { isLocalePreference, type LocalePreference } from '../i18n';
+import {
+  DEFAULT_ANIMATION_MODE,
+  isAnimationMode,
+  type AnimationMode,
+} from './motion-service';
 import {
   clearCachedPlaylist,
   clearCachedStreamMimes,
@@ -26,6 +31,12 @@ import {
 const log = createLogger('StorageService');
 
 const PREFIX = CONFIG.STORAGE_PREFIX;
+export const LIVE_RECONNECT_ATTEMPT_OPTIONS: readonly number[] = [0, 1, 2, 3, 4, 5];
+export const NUMBER_ENTRY_OSD_TIMEOUT_MS_OPTIONS: readonly number[] = [1200, 1800, 2500, 3000, 3500];
+export const PLAYER_OSD_TIMEOUT_MS_OPTIONS: readonly number[] = [3000, 5000, 8000, 10000, 12000];
+export const REFRESH_INTERVAL_HOUR_OPTIONS: readonly number[] = [0, 1, 3, 6, 12, 24];
+export const XTREAM_CATALOG_REFRESH_HOUR_OPTIONS: readonly number[] = [1, 3, 6, 12, 24];
+const HOUR_MS = 60 * 60 * 1000;
 
 type StoredCatchup = CatchupProgressEntry & { expiresAt: number };
 
@@ -58,6 +69,32 @@ let onWriteFailure: (() => void) | null = null;
 
 function cloneValue<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function sanitizeManualEpgSources(value: unknown[]): ManualEpgSource[] {
+  const sources: ManualEpgSource[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue;
+    const candidate = item as { url?: unknown; playlistIds?: unknown };
+    if (typeof candidate.url !== 'string') continue;
+    const url = candidate.url.trim();
+    if (!url) continue;
+    const playlistIds = Array.isArray(candidate.playlistIds)
+      ? candidate.playlistIds.filter((id): id is string =>
+          typeof id === 'string' && id !== '')
+      : [];
+    const existing = sources.find(source => source.url === url);
+    if (!existing) {
+      sources.push({ url, playlistIds: Array.from(new Set(playlistIds)) });
+    } else if (!existing.playlistIds.length || !playlistIds.length) {
+      existing.playlistIds = [];
+    } else {
+      for (const id of playlistIds) {
+        if (!existing.playlistIds.includes(id)) existing.playlistIds.push(id);
+      }
+    }
+  }
+  return sources;
 }
 
 function record(key: string, value: unknown, extra: Partial<UserDataRecord> = {}): UserDataRecord {
@@ -540,11 +577,123 @@ export const StorageService = {
     return stored;
   },
 
-  getEpgUrl(): string {
-    return get<string>('epg_url', '');
+  getLiveReconnectAttempts(): number {
+    const attempts = get<unknown>(
+      'live_reconnect_attempts',
+      CONFIG.PLAYER.DEFAULT_LIVE_RECONNECT_ATTEMPTS,
+    );
+    return typeof attempts === 'number' && LIVE_RECONNECT_ATTEMPT_OPTIONS.includes(attempts)
+      ? attempts
+      : CONFIG.PLAYER.DEFAULT_LIVE_RECONNECT_ATTEMPTS;
   },
-  setEpgUrl(url: string): boolean {
-    return set('epg_url', url);
+  setLiveReconnectAttempts(attempts: number): void {
+    if (!LIVE_RECONNECT_ATTEMPT_OPTIONS.includes(attempts)) {
+      throw new RangeError(`Invalid live reconnect attempts: ${String(attempts)}`);
+    }
+    set('live_reconnect_attempts', attempts);
+  },
+
+  getNumberEntryOsdTimeoutMs(): number {
+    const timeout = get<unknown>(
+      'number_entry_osd_timeout_ms',
+      CONFIG.PLAYER.DEFAULT_NUMBER_ENTRY_OSD_TIMEOUT_MS,
+    );
+    return typeof timeout === 'number' && NUMBER_ENTRY_OSD_TIMEOUT_MS_OPTIONS.includes(timeout)
+      ? timeout
+      : CONFIG.PLAYER.DEFAULT_NUMBER_ENTRY_OSD_TIMEOUT_MS;
+  },
+  setNumberEntryOsdTimeoutMs(timeout: number): void {
+    if (!NUMBER_ENTRY_OSD_TIMEOUT_MS_OPTIONS.includes(timeout)) {
+      throw new RangeError(`Invalid Number Entry OSD timeout: ${String(timeout)}`);
+    }
+    set('number_entry_osd_timeout_ms', timeout);
+  },
+
+  getPlayerOsdTimeoutMs(): number {
+    const timeout = get<unknown>(
+      'player_osd_timeout_ms',
+      CONFIG.PLAYER.DEFAULT_PLAYER_OSD_TIMEOUT_MS,
+    );
+    return typeof timeout === 'number' && PLAYER_OSD_TIMEOUT_MS_OPTIONS.includes(timeout)
+      ? timeout
+      : CONFIG.PLAYER.DEFAULT_PLAYER_OSD_TIMEOUT_MS;
+  },
+  setPlayerOsdTimeoutMs(timeout: number): void {
+    if (!PLAYER_OSD_TIMEOUT_MS_OPTIONS.includes(timeout)) {
+      throw new RangeError(`Invalid player OSD timeout: ${String(timeout)}`);
+    }
+    set('player_osd_timeout_ms', timeout);
+  },
+
+  getPlaylistRefreshIntervalHours(): number {
+    const defaultHours = CONFIG.DEFAULT_PLAYLIST_REFRESH_INTERVAL_MS / HOUR_MS;
+    const hours = get<unknown>('playlist_refresh_interval_hours', defaultHours);
+    return typeof hours === 'number' && REFRESH_INTERVAL_HOUR_OPTIONS.includes(hours)
+      ? hours
+      : defaultHours;
+  },
+  setPlaylistRefreshIntervalHours(hours: number): void {
+    if (!REFRESH_INTERVAL_HOUR_OPTIONS.includes(hours)) {
+      throw new RangeError(`Invalid playlist refresh interval: ${String(hours)}`);
+    }
+    set('playlist_refresh_interval_hours', hours);
+  },
+  getPlaylistRefreshIntervalMs(): number | null {
+    const hours = this.getPlaylistRefreshIntervalHours();
+    return hours === 0 ? null : hours * HOUR_MS;
+  },
+
+  getEpgRefreshIntervalHours(): number {
+    const defaultHours = CONFIG.DEFAULT_EPG_REFRESH_INTERVAL_MS / HOUR_MS;
+    const hours = get<unknown>('epg_refresh_interval_hours', defaultHours);
+    return typeof hours === 'number' && REFRESH_INTERVAL_HOUR_OPTIONS.includes(hours)
+      ? hours
+      : defaultHours;
+  },
+  setEpgRefreshIntervalHours(hours: number): void {
+    if (!REFRESH_INTERVAL_HOUR_OPTIONS.includes(hours)) {
+      throw new RangeError(`Invalid EPG refresh interval: ${String(hours)}`);
+    }
+    set('epg_refresh_interval_hours', hours);
+  },
+  getEpgRefreshIntervalMs(): number | null {
+    const hours = this.getEpgRefreshIntervalHours();
+    return hours === 0 ? null : hours * HOUR_MS;
+  },
+
+  getXtreamCatalogRefreshIntervalHours(): number {
+    const defaultHours = CONFIG.XTREAM.DEFAULT_CATALOG_REFRESH_INTERVAL_MS / HOUR_MS;
+    const hours = get<unknown>('xtream_catalog_refresh_interval_hours', defaultHours);
+    return typeof hours === 'number' && XTREAM_CATALOG_REFRESH_HOUR_OPTIONS.includes(hours)
+      ? hours
+      : defaultHours;
+  },
+  setXtreamCatalogRefreshIntervalHours(hours: number): void {
+    if (!XTREAM_CATALOG_REFRESH_HOUR_OPTIONS.includes(hours)) {
+      throw new RangeError(`Invalid Xtream catalog refresh interval: ${String(hours)}`);
+    }
+    set('xtream_catalog_refresh_interval_hours', hours);
+  },
+  getXtreamCatalogRefreshIntervalMs(): number {
+    return this.getXtreamCatalogRefreshIntervalHours() * HOUR_MS;
+  },
+
+  getManualEpgSources(): ManualEpgSource[] {
+    const stored = get<unknown>('manual_epg_sources', null);
+    if (Array.isArray(stored)) return sanitizeManualEpgSources(stored);
+    // TODO(post-1.16.0): Remove this migration and all `epg_url` access.
+    const legacy = get<string>('epg_url', '').trim();
+    if (!legacy) return [];
+    const migrated = [{ url: legacy, playlistIds: [] }];
+    if (set('manual_epg_sources', migrated)) remove('epg_url');
+    return migrated;
+  },
+  setManualEpgSources(sources: ManualEpgSource[]): boolean {
+    const sanitized = sanitizeManualEpgSources(sources);
+    if (!set('manual_epg_sources', sanitized)) return false;
+    // TODO(post-1.16.0): Remove with the legacy `epg_url` migration.
+    remove('epg_url');
+    return true;
   },
 
   getEpgOffsets(): Record<string, number> {
@@ -727,6 +876,24 @@ export const StorageService = {
   },
   setAutoPlay(val: boolean): void {
     set('auto_play', val);
+  },
+
+  getLivePreview(): boolean {
+    return get<unknown>('live_preview', false) === true;
+  },
+  setLivePreview(val: boolean): void {
+    set('live_preview', val);
+  },
+
+  getAnimationMode(): AnimationMode {
+    const mode = get<unknown>('animation_mode', DEFAULT_ANIMATION_MODE);
+    return isAnimationMode(mode) ? mode : DEFAULT_ANIMATION_MODE;
+  },
+  setAnimationMode(mode: AnimationMode): void {
+    if (!isAnimationMode(mode)) {
+      throw new RangeError(`Invalid animation mode: ${String(mode)}`);
+    }
+    set('animation_mode', mode);
   },
 
   // 'global' = channel_up/channel_down cycles the entire channel list

@@ -52,6 +52,36 @@ test('remote arrow keys move focus and Enter starts playback', async ({ page }) 
   await expect(page.locator('#view-player')).toBeVisible();
 });
 
+test('live playback retries the current channel before switching', async ({ page }) => {
+  await neuterVideo(page);
+  await routePlaylist(page);
+  await seedPlaylist(page);
+  await page.goto('/');
+  await expect(page.locator('#view-channels')).toBeVisible();
+  await enterTab(page, 'settings');
+  await page.locator('[data-settings-target="advanced"]').click();
+  const attempts = page.locator('#live-reconnect-attempts');
+  await attempts.locator('.dropdown-trigger').click();
+  await attempts.locator('[data-dropdown-value="1"]').click();
+  await page.locator('#save-settings').click();
+  await expect(page.locator('#view-channels')).toBeVisible();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.osd-channel-name')).toHaveText('Channel One');
+
+  const video = page.locator('#video-player');
+  await video.evaluate(el => {
+    el.dataset.originalStream = 'true';
+    el.dispatchEvent(new Event('error'));
+  });
+  await expect(page.locator('#view-player')).toBeVisible();
+  expect(await page.evaluate(() => localStorage.getItem('iptv_last_channel'))).toBe('0');
+  await expect(video).not.toHaveAttribute('data-original-stream', 'true');
+  expect(await page.evaluate(() => localStorage.getItem('iptv_last_channel'))).toBe('0');
+  await video.dispatchEvent('error');
+  await expect.poll(() =>
+    page.evaluate(() => localStorage.getItem('iptv_last_channel'))).toBe('1');
+});
+
 test('player sidebar focuses the playing channel; search still filters', async ({ page }) => {
   await routePlaylist(page, SEARCH_M3U);
   await seedPlaylist(page);
@@ -121,8 +151,12 @@ test('large sidebar decodes visible logos before revealing one per frame', async
       }
     }
     Object.defineProperty(window, 'Image', { configurable: true, value: DeferredImage });
-    (window as unknown as { resolveSidebarLogoDecodes: () => number })
-      .resolveSidebarLogoDecodes = () => {
+    const controls = window as unknown as {
+      pendingSidebarLogoDecodes: () => number;
+      resolveSidebarLogoDecodes: () => number;
+    };
+    controls.pendingSidebarLogoDecodes = () => pending.length;
+    controls.resolveSidebarLogoDecodes = () => {
         const ready = pending.splice(0);
         ready.forEach(resolve => resolve());
         return ready.length;
@@ -146,7 +180,9 @@ test('large sidebar decodes visible logos before revealing one per frame', async
     element => parseFloat((element as HTMLElement).style.height),
   )).toBe(900 * 88);
 
-  await page.waitForTimeout(300);
+  await expect.poll(() => page.evaluate(() =>
+    (window as unknown as { pendingSidebarLogoDecodes: () => number })
+      .pendingSidebarLogoDecodes())).toBeGreaterThan(1);
   const counts = await page.evaluate(async () => {
     const resolved = (window as unknown as { resolveSidebarLogoDecodes: () => number })
       .resolveSidebarLogoDecodes();
@@ -172,7 +208,9 @@ test('large sidebar decodes visible logos before revealing one per frame', async
   await expect(sidebar.locator('img.ch-logo[src]')).toHaveCount(0);
   expect(await pending.count()).toBeGreaterThan(0);
 
-  await page.waitForTimeout(300);
+  await expect.poll(() => page.evaluate(() =>
+    (window as unknown as { pendingSidebarLogoDecodes: () => number })
+      .pendingSidebarLogoDecodes())).toBeGreaterThan(1);
   const reopened = await page.evaluate(async () => {
     (window as unknown as { resolveSidebarLogoDecodes: () => number })
       .resolveSidebarLogoDecodes();
@@ -231,7 +269,7 @@ test('dark player overlay keeps sidebar scrollbar dark on a light theme', async 
     thumb: getComputedStyle(element, '::-webkit-scrollbar-thumb').backgroundColor,
   }));
   expect(colors.track).toBe('rgb(18, 18, 26)');
-  expect(colors.thumb).toBe('rgb(42, 42, 62)');
+  expect(colors.thumb).toBe('rgb(102, 102, 128)');
 });
 
 test('player sidebar expands groups and retains a selected group after tuning', async ({ page }) => {
@@ -432,7 +470,22 @@ test('the right-edge player menu opens and lists its color actions', async ({ pa
   await expect(menu).toContainText('Settings');
 
   // The first item is focused on open; Down moves focus to the second.
-  await expect(menu.locator('.menu-item.focused')).toHaveCount(1);
+  const focused = menu.locator('.menu-item.focused');
+  await expect(focused).toHaveCount(1);
+  const gutter = await focused.evaluate((element) => {
+    const list = element.parentElement;
+    if (!list) throw new Error('Player menu item has no list');
+    const listRect = list.getBoundingClientRect();
+    const itemRect = element.getBoundingClientRect();
+    return {
+      left: itemRect.left - listRect.left,
+      right: listRect.right - itemRect.right,
+      top: itemRect.top - listRect.top,
+    };
+  });
+  expect(gutter.left).toBeGreaterThanOrEqual(20);
+  expect(gutter.right).toBeGreaterThanOrEqual(20);
+  expect(gutter.top).toBeGreaterThanOrEqual(20);
   await page.keyboard.press('ArrowDown');
   await expect(menu.locator('.menu-item').nth(1)).toHaveClass(/focused/);
 });

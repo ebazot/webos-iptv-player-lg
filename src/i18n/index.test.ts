@@ -2,6 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_LOCALE,
+  formatNumber,
   isLocalePreference,
   localeOptions,
   resolveLocale,
@@ -71,6 +72,76 @@ describe('i18n', () => {
       { value: 'uk', label: 'Українська' },
       { value: 'zh-CN', label: '简体中文' },
     ]);
+  });
+
+  it('pluralizes refresh-hour options in every locale', () => {
+    setLocale('en');
+    expect(tp('settings.refreshHours', 1)).toBe('1 hour');
+    expect(tp('settings.refreshHours', 3)).toBe('3 hours');
+    setLocale('de');
+    expect(tp('settings.refreshHours', 1)).toBe('1 Stunde');
+    expect(tp('settings.refreshHours', 3)).toBe('3 Stunden');
+    setLocale('es');
+    expect(tp('settings.refreshHours', 1)).toBe('1 hora');
+    expect(tp('settings.refreshHours', 3)).toBe('3 horas');
+    setLocale('fr');
+    expect(tp('settings.refreshHours', 1)).toBe('1 heure');
+    expect(tp('settings.refreshHours', 3)).toBe('3 heures');
+    setLocale('it');
+    expect(tp('settings.refreshHours', 1)).toBe('1 ora');
+    expect(tp('settings.refreshHours', 3)).toBe('3 ore');
+    setLocale('pt-BR');
+    expect(tp('settings.refreshHours', 1)).toBe('1 hora');
+    expect(tp('settings.refreshHours', 3)).toBe('3 horas');
+    setLocale('ru');
+    expect([
+      tp('settings.refreshHours', 1),
+      tp('settings.refreshHours', 3),
+      tp('settings.refreshHours', 6),
+      tp('settings.refreshHours', 12),
+      tp('settings.refreshHours', 24),
+    ]).toEqual(['1 час', '3 часа', '6 часов', '12 часов', '24 часа']);
+    setLocale('uk');
+    expect([
+      tp('settings.refreshHours', 1),
+      tp('settings.refreshHours', 3),
+      tp('settings.refreshHours', 6),
+      tp('settings.refreshHours', 12),
+      tp('settings.refreshHours', 24),
+    ]).toEqual(['1 година', '3 години', '6 годин', '12 годин', '24 години']);
+    setLocale('zh-CN');
+    expect(tp('settings.refreshHours', 1)).toBe('1 小时');
+    expect(tp('settings.refreshHours', 3)).toBe('3 小时');
+  });
+
+  it('formats and pluralizes second durations by locale', () => {
+    const duration = (seconds: number) => tp('settings.durationSeconds', seconds, {
+      seconds: formatNumber(seconds, { maximumFractionDigits: 1 }),
+    });
+
+    setLocale('en');
+    expect(duration(1)).toBe('1 second');
+    expect(duration(1.2)).toBe('1.2 seconds');
+    expect(duration(3)).toBe('3 seconds');
+
+    setLocale('de');
+    expect(duration(1)).toBe('1 Sekunde');
+    expect(duration(1.2)).toBe('1,2 Sekunden');
+
+    setLocale('ru');
+    expect(duration(1)).toBe('1 секунда');
+    expect(duration(2)).toBe('2 секунды');
+    expect(duration(5)).toBe('5 секунд');
+    expect(duration(1.2)).toBe('1,2 секунды');
+
+    setLocale('uk');
+    expect(duration(1)).toBe('1 секунда');
+    expect(duration(2)).toBe('2 секунди');
+    expect(duration(5)).toBe('5 секунд');
+    expect(duration(1.2)).toBe('1,2 секунди');
+
+    setLocale('zh-CN');
+    expect(duration(1.2)).toBe('1.2 秒');
   });
 
   it('translates and interpolates Simplified Chinese messages', () => {
@@ -155,5 +226,23 @@ describe('i18n', () => {
 
   it('has no empty translations or mismatched placeholders', () => {
     expect(validateTranslations()).toEqual([]);
+  });
+
+  it('localizes live preview settings and remaining minutes in every locale', () => {
+    try {
+      for (const { value } of localeOptions()) {
+        setLocale(value);
+        expect(t('settings.livePreview').length).toBeGreaterThan(0);
+        expect(t('settings.livePreviewHint').length).toBeGreaterThan(0);
+        for (const minutes of [0, 1, 2, 25]) {
+          const remaining = t('preview.timeLeft', { minutes });
+          expect(remaining).toContain(String(minutes));
+          expect(remaining).not.toContain('{minutes}');
+        }
+      }
+    } finally {
+      setLocale(DEFAULT_LOCALE);
+    }
+    expect(t('preview.timeLeft', { minutes: 5 })).toBe('5 min left');
   });
 });

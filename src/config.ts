@@ -13,13 +13,21 @@ export const CONFIG = {
   SERVICE_ID: __SERVICE_ID__,
   SERVICE_HOST: '127.0.0.1',
 
-  PLAYLIST_REFRESH_INTERVAL: 6 * 60 * 60 * 1000,
+  DEFAULT_PLAYLIST_REFRESH_INTERVAL_MS: 6 * 60 * 60 * 1000,
   WORKER_IDLE_TERMINATION_MS: 1000,
   PLAYLIST_CACHE_WRITE_DELAY_MS: 1200,
-  EPG_REFRESH_INTERVAL: 6 * 60 * 60 * 1000,
+  DEFAULT_EPG_REFRESH_INTERVAL_MS: 6 * 60 * 60 * 1000,
   REMINDER_SCAN_INTERVAL: 30 * 1000,
+  CHANNEL_SCROLLBAR_HIDE_MS: 900,
+  NAVIGATION: {
+    // Treat fast successive focus changes as held-key navigation. The repeat
+    // interval measured on LG remotes is around 80 ms; leave room for load.
+    FOCUS_REPEAT_WINDOW_MS: 180,
+  },
   PLAYER: {
-    OSD_TIMEOUT: 5000,
+    LIVE_PREVIEW_UPCOMING_COUNT: 4,
+    LIVE_PREVIEW_REFRESH_MS: 1000,
+    DEFAULT_PLAYER_OSD_TIMEOUT_MS: 5000,
     BUFFER_LENGTH: 30,
     MANIFEST_TIMEOUT: 5000,
     MANIFEST_MAX_BYTES: 256 * 1024,
@@ -32,13 +40,13 @@ export const CONFIG = {
     STREAM_MIME_CACHE_TTL: 7 * 24 * 60 * 60 * 1000,
     // Long enough to type a second or third digit, short enough that a
     // full-width number does not feel stalled once it can no longer grow.
-    CHANNEL_NUMBER_TIMEOUT: 1200,
+    DEFAULT_NUMBER_ENTRY_OSD_TIMEOUT_MS: 1200,
     CHANNEL_NUMBER_MAX_DIGITS: 4,  // fallback cap until the channel count is known
     SEEK_STEP: 30,              // seconds per Left/Right press while seeking catch-up or live DVR
     HLS_MAX_RECOVERIES: 3,      // bounded hls.js fatal-error retries before giving up → next channel
     STALL_POLL_MS: 2000,        // native stall watchdog: currentTime poll interval
     STALL_FREEZE_TICKS: 5,      // ~10s frozen before the first in-place reload
-    STALL_MAX_RELOADS: 2,       // in-place reloads before escalating to the next channel
+    DEFAULT_LIVE_RECONNECT_ATTEMPTS: 3, // reconnect attempts before switching channels
     STARTUP_POLL_MS: 500,       // startup watchdog: readyState/networkState poll interval
     STARTUP_TIMEOUT: 15000,     // ms a stream may load without a frame before it counts as failed
     DVR_MIN_WINDOW: 10,         // live DVR: a seekable window must exceed this (s) to offer timeshift
@@ -68,7 +76,7 @@ export const CONFIG = {
 
   // Xtream Movies/Series catalog + resume tuning.
   XTREAM: {
-    CATALOG_TTL_MS: 6 * 60 * 60 * 1000,  // catalog cache freshness before a re-fetch
+    DEFAULT_CATALOG_REFRESH_INTERVAL_MS: 6 * 60 * 60 * 1000,
     ACCOUNT_MAX_BYTES: 1024 * 1024,      // account/server metadata response budget
     CATEGORY_MAX_BYTES: 2 * 1024 * 1024, // category-list response budget
     CATALOG_MAX_BYTES: 32 * 1024 * 1024, // full or per-category stream-list budget

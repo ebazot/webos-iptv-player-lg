@@ -4,6 +4,8 @@ import type {
   CatchupInfo,
   Channel,
   ChannelScope,
+  LivePlaybackSnapshot,
+  LivePlaybackStatus,
   NumberEvent,
   SubtitleTrackOption,
   VodPlayback,
@@ -84,6 +86,7 @@ export class Player {
   private liveHistoryGeneration = -1;
   private liveHistoryTimer: ReturnType<typeof setTimeout> | null = null;
   private errorAdvanceTimer: ReturnType<typeof setTimeout> | null = null;
+  private errorRetryPending = false;
   // Manual A/V resync (catch-up / VOD): true from the resync seek until playback
   // resumes, gating the "Resyncing…" message and debouncing repeat presses.
   private resyncing = false;
@@ -93,12 +96,21 @@ export class Player {
   private stallWatchdog: StallWatchdog;
   private startupWatchdog: StartupWatchdog;
   private startupPending = false;
+  private liveSessionActive = false;
+  private playbackActive = false;
+  private livePreviewMode = false;
+  private livePlaybackStatus: LivePlaybackStatus = 'loading';
+  private liveMuted = false;
+  private liveVolume = 1;
+  private previewMuteOverride: boolean | null = null;
   constructor(
     container: HTMLElement,
     onBack: () => void,
     onTvPlaybackChanged: (channelIndex: number, catchupStart: number | null) => void = () => {},
     canAutoRevealOsd: () => boolean = () => true,
     onChannelHealthChanged: () => void = () => {},
+    private onPlaybackStateChanged: () => void = () => {},
+    private canResumePlayback: () => boolean = () => true,
   ) {
     this.container = container;
     this.onBack = onBack;
@@ -109,7 +121,7 @@ export class Player {
       playbackLabel: loadToken => this.playbackLabel(loadToken),
       mediaState: video => this.mediaState(video),
       isCatchup: () => this.catchupInfo !== null,
-      onError: () => this.onError(),
+      onError: reason => this.onError(reason),
       onAudioTracksUpdated: () => {
         this.tracks.applyHlsAudioSelection();
         if (this.osd.isVisible()) this.osd.render();
@@ -145,26 +157,29 @@ export class Player {
           currentTime: v.currentTime,
           readyState: v.readyState,
           networkState: v.networkState,
-          paused: v.paused,
+          paused: v.paused && !this.startupPending,
           seeking: v.seeking,
         };
       },
       onReload: recovery => {
-        log.warn('Watchdog reloading a stalled stream',
-          'event=playback.stall.reload', this.playbackLabel(),
+        log.warn('Reconnecting live stream',
+          'event=playback.recovery.reload', this.playbackLabel(),
+          `cause=${recovery.cause}`,
           this.recoveryState(recovery));
         this.reloadCurrentStream();
       },
       onEscalate: recovery => {
-        log.error('Watchdog recovery exhausted; advancing channel',
-          'event=playback.stall.exhausted', this.playbackLabel(),
+        log.error('Live stream recovery exhausted; advancing channel',
+          'event=playback.recovery.exhausted', this.playbackLabel(),
+          `cause=${recovery.cause}`,
           this.recoveryState(recovery));
-        this.markLiveUnavailable('stall_exhausted');
+        this.markLiveUnavailable(recovery.cause === 'stall' ? 'stall_exhausted' : 'playback_error');
+        this.osd.updateMessage(t('player.streamError'));
         this.channelUp();
       },
       pollMs: CONFIG.PLAYER.STALL_POLL_MS,
       freezeTicks: CONFIG.PLAYER.STALL_FREEZE_TICKS,
-      maxReloads: CONFIG.PLAYER.STALL_MAX_RELOADS,
+      maxReloads: CONFIG.PLAYER.DEFAULT_LIVE_RECONNECT_ATTEMPTS,
     });
     this.startupWatchdog = new StartupWatchdog({
       probe: (): StartupProbe => {
@@ -206,17 +221,31 @@ export class Player {
   }
 
   private bindVideoEvents(el: HTMLVideoElement): void {
-    el.addEventListener('error', () => this.onError());
+    const onCurrent = (type: string, listener: () => void): void => {
+      el.addEventListener(type, () => {
+        if (el === this.videoEl) listener();
+      });
+    };
+    const update = (status?: LivePlaybackStatus) => {
+      if (status && this.liveSessionActive) this.livePlaybackStatus = status;
+      this.onPlaybackStateChanged();
+    };
+    onCurrent('pause', () => update('paused'));
+    onCurrent('volumechange', () => {
+      if (this.liveSessionActive && !this.vod) this.rememberLiveAudio();
+      update();
+    });
+    onCurrent('error', () => this.onError(el.error?.code === 4 ? 'unsupported' : undefined));
     // Resource selection starts here. Until then readyState/networkState still
     // describe the previous stream — on webOS the content-type probe can defer
     // the attach by up to MANIFEST_TIMEOUT — and recreateVideoEl() loads a
     // sourceless element, which is not a startup attempt.
-    el.addEventListener('loadstart', () => {
-      if (el !== this.videoEl) return;
+    onCurrent('loadstart', () => {
       if (!el.currentSrc && !el.getAttribute('src') && !el.querySelector('source')) return;
       this.startupWatchdog.start();
     });
-    el.addEventListener('loadedmetadata', () => {
+    onCurrent('loadedmetadata', () => {
+      update();
       log.info('loadedmetadata', this.videoLabel(el), el.videoWidth + 'x' + el.videoHeight,
         this.mediaState(el), '| pendingResume:', this.pendingResumeSecs);
       if ((this.vod || this.catchupInfo) && this.pendingResumeSecs > 0 && Number.isFinite(el.duration) && el.duration > 0) {
@@ -233,19 +262,31 @@ export class Player {
     // The watchdog's own success condition — a decoded first frame, whether or
     // not playback was allowed to begin (autoplay can be rejected, or the user
     // can pause while the spinner is up).
-    el.addEventListener('loadeddata', () => {
+    onCurrent('loadeddata', () => {
       this.startupPending = false;
       if (this.catchupInfo) this.catchupVariantConfirmed = true;
     });
     // Intrinsic size changes mid-stream (ABR up/down-switch) so the OSD pills
     // (resolution, and on hls.js the codec/HDR/fps) reflect the live variant.
-    el.addEventListener('resize', () => {
+    onCurrent('resize', () => {
       if (this.osd.isVisible()) this.osd.render();
     });
     // Some platforms populate audio/text tracks asynchronously, after loadedmetadata.
-    el.audioTracks?.addEventListener?.('addtrack', () => this.tracks.applyNativeAudioSelection());
-    el.textTracks?.addEventListener?.('addtrack', () => this.tracks.applyNativeSubtitleSelection());
-    el.addEventListener('playing', () => {
+    el.audioTracks?.addEventListener?.('addtrack', () => {
+      if (el === this.videoEl) this.tracks.applyNativeAudioSelection();
+    });
+    el.textTracks?.addEventListener?.('addtrack', () => {
+      if (el === this.videoEl) this.tracks.applyNativeSubtitleSelection();
+    });
+    onCurrent('playing', () => {
+      this.startupPending = false;
+      const recovered = this.errorRetryPending;
+      if (recovered) {
+        this.cancelErrorAdvance();
+        if (isWebOS) this.stallWatchdog.resume();
+      }
+      update('playing');
+      if (recovered) this.osd.render();
       log.info('playing', this.videoLabel(el), this.mediaState(el));
       if (this.catchupInfo) this.catchupVariantConfirmed = true;
       this.startupWatchdog.stop();
@@ -255,31 +296,43 @@ export class Player {
       this.confirmLiveHistory(el);
       if (this.osd.isVisible()) this.osd.resetTimer();
     });
-    el.addEventListener('waiting', () => {
+    onCurrent('waiting', () => {
+      update('buffering');
       log.debug('waiting', this.videoLabel(el), this.mediaState(el));
       this.cancelLiveHistoryTimer();
     });
-    el.addEventListener('stalled', () => {
+    onCurrent('stalled', () => {
       log.debug('stalled event', this.videoLabel(el), this.mediaState(el));
     });
-    el.addEventListener('timeupdate', () => {
+    onCurrent('timeupdate', () => {
+      if (this.liveSessionActive && !this.catchupInfo && !el.paused && !el.seeking) {
+        const recovered = this.stallWatchdog.observeProgress(el.currentTime);
+        if (recovered && this.errorRetryPending) {
+          this.cancelErrorAdvance();
+          if (isWebOS) this.stallWatchdog.resume();
+          update('playing');
+          this.osd.render();
+        }
+      }
       this.reconcileLiveDvrPosition(el);
       this.reconcilePendingSeek(el);
       this.refreshProgress();
     });
-    el.addEventListener('progress', () => {
+    onCurrent('progress', () => {
       this.reconcileLiveDvrPosition(el);
     });
-    el.addEventListener('durationchange', () => {
+    onCurrent('durationchange', () => {
       this.reconcileLiveDvrPosition(el);
     });
-    el.addEventListener('seeked', () => {
+    onCurrent('seeked', () => {
       log.info('seeked', this.videoLabel(el), this.mediaState(el));
       this.reconcilePendingSeek(el, true);
       if (this.catchupInfo) this.saveCatchupProgress();
       this.refreshProgress();
     });
-    el.addEventListener('ended', () => this.onEnded());
+    onCurrent('ended', () => {
+      if (this.playbackActive) this.onEnded();
+    });
   }
 
   private playbackLabel(load = this.pipeline.currentLoadToken()): string {
@@ -345,14 +398,22 @@ export class Player {
     const fresh = document.createElement('video');
     fresh.id = old.id;
     fresh.autoplay = true;
+    fresh.muted = !!old.muted;
+    fresh.volume = Number.isFinite(old.volume) ? old.volume : 1;
+    fresh.playbackRate = Number.isFinite(old.playbackRate) ? old.playbackRate : 1;
     this.bindVideoEvents(fresh);
     old.parentNode!.replaceChild(fresh, old);
     this.videoEl = fresh;
     this.pipeline.setVideoElement(fresh);
+    this.onPlaybackStateChanged();
   }
 
   resume(): void {
     if (!this.videoEl) return;
+    if (!this.canResumePlayback()) {
+      this.stop();
+      return;
+    }
     // A stream still starting when we were hidden gets a fresh budget. Element
     // state alone can't say that: a seek into an unbuffered region also drops
     // readyState below HAVE_CURRENT_DATA.
@@ -412,13 +473,18 @@ export class Player {
 
   private startPlaybackGeneration(): void {
     this.cancelLiveHistoryTimer();
+    this.cancelErrorAdvance();
+    this.playbackGeneration++;
+    this.healthStartedAt = Date.now();
+    this.liveHistoryGeneration = -1;
+  }
+
+  private cancelErrorAdvance(): void {
     if (this.errorAdvanceTimer !== null) {
       clearTimeout(this.errorAdvanceTimer);
       this.errorAdvanceTimer = null;
     }
-    this.playbackGeneration++;
-    this.healthStartedAt = Date.now();
-    this.liveHistoryGeneration = -1;
+    this.errorRetryPending = false;
   }
 
   private cancelLiveHistoryTimer(): void {
@@ -460,6 +526,8 @@ export class Player {
     scope?: ChannelScope | null,
   ): void {
     if (!this.videoEl) return;
+    if (this.liveSessionActive) this.rememberLiveAudio();
+    this.playbackActive = true;
     this.stallWatchdog.stop();
     this.startPlaybackGeneration();
 
@@ -484,10 +552,16 @@ export class Player {
     if (channelIndex >= 0) this.currentIndexAnchor = channelIndex;
     if (scope !== undefined) this.currentScope = scope;
     this.catchupInfo = catchup || null;
+    this.liveSessionActive = !catchup;
+    this.livePlaybackStatus = 'loading';
     this.onTvPlaybackChanged(channelIndex, catchup ? catchup.start * 1000 : null);
     this.catchupSourceIndex = 0;
     this.catchupVariantConfirmed = false;
     this.vod = null;
+    this.videoEl.muted = this.livePreviewMode && this.previewMuteOverride !== null
+      ? this.previewMuteOverride
+      : this.liveMuted;
+    this.videoEl.volume = this.liveVolume;
     this.catchupCheckpointAt = Date.now(); // reset periodic-save timer for the new session
     this.osd.clearFailedIcons();
     if (channelIndex >= 0) StorageService.setLastChannel(channelIndex);
@@ -497,15 +571,21 @@ export class Player {
     if (catchup) log.debug('catchup URL:', diagnosticStreamUrl(url));
 
     this.videoEl.classList.add('active');
+    this.onPlaybackStateChanged();
     this.loadStream(url, channel.extras);
     this.showOSD();
-    show(this.container);
-    if (isWebOS) this.stallWatchdog.start();
+    if (!this.livePreviewMode) show(this.container);
+    this.stallWatchdog.start(isWebOS, StorageService.getLiveReconnectAttempts());
   }
 
   isVod(): boolean { return this.vod !== null; }
 
   playVod(v: VodPlayback): void {
+    if (this.liveSessionActive) this.rememberLiveAudio();
+    this.playbackActive = true;
+    this.livePreviewMode = false;
+    this.restoreLiveMute();
+    this.liveSessionActive = false;
     this.stallWatchdog.stop();
     if (!this.videoEl) { log.warn('playVod ignored — no video element'); return; }
     this.startPlaybackGeneration();
@@ -704,6 +784,12 @@ export class Player {
   }
 
   stop(): void {
+    if (this.liveSessionActive) this.rememberLiveAudio();
+    this.liveSessionActive = false;
+    this.livePreviewMode = false;
+    this.restoreLiveMute();
+    this.playbackActive = false;
+    this.wasPlayingBeforeHide = false;
     this.startPlaybackGeneration();
     this.clearUpNextTimer();
     if (this.vod) this.saveVodResume();
@@ -731,6 +817,7 @@ export class Player {
     this.catchupVariantConfirmed = false;
     this.resyncing = false;
     if (this.resyncTimer) { clearTimeout(this.resyncTimer); this.resyncTimer = null; }
+    this.onPlaybackStateChanged();
   }
 
   private startNextItem(
@@ -822,7 +909,7 @@ export class Player {
     log.error('Stream never started', 'event=playback.startup.failed',
       this.playbackLabel(), ...detail);
     this.startupPending = false;
-    this.onError();
+    this.onError('unsupported');
   }
 
   private applyPipelineManifest(manifest: PipelineManifest): void {
@@ -830,7 +917,13 @@ export class Player {
     this.tracks.applyManifest(manifest);
   }
 
-  private onError(): void {
+  private onError(reason?: 'unsupported'): void {
+    if (!this.playbackActive || this.wasPlayingBeforeHide) return;
+    if (this.errorAdvanceTimer !== null) return;
+    if (this.liveSessionActive) {
+      this.livePlaybackStatus = 'error';
+      this.onPlaybackStateChanged();
+    }
     this.cancelLiveHistoryTimer();
     if (this.vod) {
       const v = this.vod;
@@ -877,14 +970,29 @@ export class Player {
       );
     }
     const v = this.videoEl;
-    if (this.errorAdvanceTimer !== null) return;
-    this.markLiveUnavailable('playback_error');
     log.error('Video playback error', 'event=playback.video.error',
       this.playbackLabel(),
       v ? this.mediaState(v) : 'no video element',
       v?.error ? { code: v.error.code, message: v.error.message } : 'no error info',
       '| channel:', this.currentChannel?.name,
       '| url:', diagnosticStreamUrl(v?.currentSrc || this.currentChannel?.url || ''));
+    if (this.liveSessionActive && !this.catchupInfo && reason !== 'unsupported') {
+      this.stallWatchdog.pause();
+      this.errorRetryPending = true;
+      this.livePlaybackStatus = 'buffering';
+      this.onPlaybackStateChanged();
+      this.osd.updateMessage(t('player.reconnecting'));
+      this.errorAdvanceTimer = setTimeout(() => {
+        this.errorAdvanceTimer = null;
+        this.errorRetryPending = false;
+        if (this.stallWatchdog.recoverFromError() && isWebOS) {
+          this.stallWatchdog.resume();
+        }
+      }, 2000);
+      return;
+    }
+    this.stallWatchdog.stop();
+    this.markLiveUnavailable('playback_error');
     this.osd.updateMessage(t('player.streamError'));
     this.errorAdvanceTimer = setTimeout(() => {
       this.errorAdvanceTimer = null;
@@ -920,7 +1028,61 @@ export class Player {
   }
 
   showOSD(): void {
+    if (this.livePreviewMode) return;
     this.osd.show();
+  }
+
+  getVideoElement(): HTMLVideoElement | null { return this.videoEl; }
+
+  isInLivePreview(): boolean { return this.livePreviewMode; }
+
+  enterLivePreview(): void {
+    if (this.livePreviewMode) return;
+    if (this.liveSessionActive) this.rememberLiveAudio();
+    this.previewMuteOverride = null;
+    this.livePreviewMode = true;
+    this.hideOSD();
+    hide(this.container);
+    const win = this.liveDvrWindow();
+    if (win && !dvrState(
+      win, this.videoEl?.currentTime ?? win.end, CONFIG.PLAYER.DVR_LIVE_EDGE,
+    ).atLiveEdge) {
+      this.seekTo(win.end, false);
+    }
+  }
+
+  exitLivePreview(): void {
+    if (!this.livePreviewMode) return;
+    this.livePreviewMode = false;
+    this.restoreLiveMute();
+  }
+
+  getLivePlaybackSnapshot(): LivePlaybackSnapshot | null {
+    if (!this.liveSessionActive || !this.currentChannel || !this.videoEl || this.vod || this.catchupInfo) return null;
+    return {
+      channel: this.currentChannel,
+      muted: this.videoEl.muted,
+      status: this.livePlaybackStatus,
+    };
+  }
+
+  togglePreviewMute(): void {
+    if (!this.livePreviewMode || !this.liveSessionActive || !this.videoEl) return;
+    this.previewMuteOverride = !this.videoEl.muted;
+    this.videoEl.muted = this.previewMuteOverride;
+    this.onPlaybackStateChanged();
+  }
+
+  private rememberLiveAudio(): void {
+    if (!this.videoEl) return;
+    if (this.livePreviewMode) this.previewMuteOverride = !!this.videoEl.muted;
+    else this.liveMuted = !!this.videoEl.muted;
+    this.liveVolume = Number.isFinite(this.videoEl.volume) ? this.videoEl.volume : 1;
+  }
+
+  private restoreLiveMute(): void {
+    this.previewMuteOverride = null;
+    if (this.videoEl) this.videoEl.muted = this.liveMuted;
   }
 
   /** The live DVR window (seekable timeshift) when playing live with a usable
@@ -958,7 +1120,7 @@ export class Player {
     else if (Number.isFinite(v.duration)) this.seekTo(f * v.duration);
   }
 
-  private seekTo(time: number): void {
+  private seekTo(time: number, showControls = true): void {
     const v = this.videoEl;
     if (!v) return;
     const win = this.liveDvrWindow();
@@ -975,7 +1137,9 @@ export class Player {
       return;
     }
     v.currentTime = this.pendingSeekTarget;
-    if (this.osd.isVisible()) this.osd.resetTimer(); else this.showOSD();
+    if (showControls) {
+      if (this.osd.isVisible()) this.osd.resetTimer(); else this.showOSD();
+    }
     this.refreshProgress();
   }
 
@@ -999,7 +1163,7 @@ export class Player {
   }
 
   private reconcileLiveDvrPosition(el: HTMLVideoElement): void {
-    if (el !== this.videoEl || el.seeking) return;
+    if (el !== this.videoEl || el.paused || el.seeking) return;
     const win = this.liveDvrWindow();
     if (!win || el.currentTime >= win.start) return;
     const target = this.oldestDvrTarget(win);
@@ -1328,19 +1492,30 @@ export class Player {
     return this.currentChannel;
   }
 
-  /** Re-point the playing index after a customization reordered the channel list.
-   *  Playback itself is untouched — only the index the UI reports changes. */
+  /** Rebind live playback after the channel catalog is rebuilt or reordered. */
   syncCurrentIndex(): void {
     if (!this.currentChannel) return;
-    const idx = PlaylistService.indexOf(this.currentChannel);
-    if (idx >= 0) {
-      this.currentIndex = idx;
-      this.currentIndexAnchor = idx;
-      this.onTvPlaybackChanged(idx, this.catchupInfo ? this.catchupInfo.start * 1000 : null);
-    } else {
+    const resolved = PlaylistService.resolveChannelKey(channelKey(this.currentChannel));
+    if (!resolved) {
       this.currentIndex = -1;
       this.onTvPlaybackChanged(-1, this.catchupInfo ? this.catchupInfo.start * 1000 : null);
+      this.onPlaybackStateChanged();
+      return;
     }
+    if (this.liveSessionActive && !this.catchupInfo
+        && this.resolveStreamUrl(this.currentChannel, null)
+          !== this.resolveStreamUrl(resolved.channel, null)) {
+      this.play(resolved.channelIndex);
+      return;
+    }
+    this.currentChannel = resolved.channel;
+    this.currentIndex = resolved.channelIndex;
+    this.currentIndexAnchor = resolved.channelIndex;
+    this.onTvPlaybackChanged(
+      resolved.channelIndex,
+      this.catchupInfo ? this.catchupInfo.start * 1000 : null,
+    );
+    this.onPlaybackStateChanged();
   }
 
   getAudioTracks(): AudioTrackOption[] {

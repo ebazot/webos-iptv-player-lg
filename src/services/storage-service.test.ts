@@ -2,7 +2,14 @@
 import 'fake-indexeddb/auto';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { Channel } from '../types';
-import { StorageService } from './storage-service';
+import {
+  NUMBER_ENTRY_OSD_TIMEOUT_MS_OPTIONS,
+  LIVE_RECONNECT_ATTEMPT_OPTIONS,
+  PLAYER_OSD_TIMEOUT_MS_OPTIONS,
+  REFRESH_INTERVAL_HOUR_OPTIONS,
+  StorageService,
+  XTREAM_CATALOG_REFRESH_HOUR_OPTIONS,
+} from './storage-service';
 import { channelKey, legacyChannelKey } from '../utils/channel';
 import { CONFIG } from '../config';
 import {
@@ -24,6 +31,131 @@ describe('StorageService', () => {
 
   it('returns an empty playlist list by default', () => {
     expect(StorageService.getPlaylists()).toEqual([]);
+  });
+
+  it('validates and persists the live reconnect limit', () => {
+    expect(StorageService.getLiveReconnectAttempts())
+      .toBe(CONFIG.PLAYER.DEFAULT_LIVE_RECONNECT_ATTEMPTS);
+    for (const attempts of LIVE_RECONNECT_ATTEMPT_OPTIONS) {
+      StorageService.setLiveReconnectAttempts(attempts);
+      expect(StorageService.getLiveReconnectAttempts()).toBe(attempts);
+    }
+    expect(() => StorageService.setLiveReconnectAttempts(6)).toThrow(RangeError);
+    expect(() => StorageService.setLiveReconnectAttempts(NaN)).toThrow(RangeError);
+    StorageService.set('live_reconnect_attempts', '5');
+    expect(StorageService.getLiveReconnectAttempts())
+      .toBe(CONFIG.PLAYER.DEFAULT_LIVE_RECONNECT_ATTEMPTS);
+    StorageService.setLiveReconnectAttempts(5);
+    StorageService.clearAll();
+    expect(StorageService.getLiveReconnectAttempts())
+      .toBe(CONFIG.PLAYER.DEFAULT_LIVE_RECONNECT_ATTEMPTS);
+  });
+
+  it('validates and persists OSD timeouts', () => {
+    expect(StorageService.getNumberEntryOsdTimeoutMs())
+      .toBe(CONFIG.PLAYER.DEFAULT_NUMBER_ENTRY_OSD_TIMEOUT_MS);
+    expect(StorageService.getPlayerOsdTimeoutMs())
+      .toBe(CONFIG.PLAYER.DEFAULT_PLAYER_OSD_TIMEOUT_MS);
+    for (const timeout of NUMBER_ENTRY_OSD_TIMEOUT_MS_OPTIONS) {
+      StorageService.setNumberEntryOsdTimeoutMs(timeout);
+      expect(StorageService.getNumberEntryOsdTimeoutMs()).toBe(timeout);
+    }
+    for (const timeout of PLAYER_OSD_TIMEOUT_MS_OPTIONS) {
+      StorageService.setPlayerOsdTimeoutMs(timeout);
+      expect(StorageService.getPlayerOsdTimeoutMs()).toBe(timeout);
+    }
+    expect(() => StorageService.setNumberEntryOsdTimeoutMs(1100)).toThrow(RangeError);
+    expect(() => StorageService.setPlayerOsdTimeoutMs(NaN)).toThrow(RangeError);
+    StorageService.set('number_entry_osd_timeout_ms', '1800');
+    StorageService.set('player_osd_timeout_ms', {});
+    expect(StorageService.getNumberEntryOsdTimeoutMs())
+      .toBe(CONFIG.PLAYER.DEFAULT_NUMBER_ENTRY_OSD_TIMEOUT_MS);
+    expect(StorageService.getPlayerOsdTimeoutMs())
+      .toBe(CONFIG.PLAYER.DEFAULT_PLAYER_OSD_TIMEOUT_MS);
+  });
+
+  it('validates and persists playlist and guide refresh intervals', () => {
+    expect(StorageService.getPlaylistRefreshIntervalHours()).toBe(6);
+    expect(StorageService.getEpgRefreshIntervalHours()).toBe(6);
+    for (const hours of REFRESH_INTERVAL_HOUR_OPTIONS) {
+      StorageService.setPlaylistRefreshIntervalHours(hours);
+      StorageService.setEpgRefreshIntervalHours(hours);
+      expect(StorageService.getPlaylistRefreshIntervalHours()).toBe(hours);
+      expect(StorageService.getEpgRefreshIntervalHours()).toBe(hours);
+      expect(StorageService.getPlaylistRefreshIntervalMs())
+        .toBe(hours === 0 ? null : hours * 60 * 60 * 1000);
+      expect(StorageService.getEpgRefreshIntervalMs())
+        .toBe(hours === 0 ? null : hours * 60 * 60 * 1000);
+    }
+    expect(() => StorageService.setPlaylistRefreshIntervalHours(2)).toThrow(RangeError);
+    expect(() => StorageService.setEpgRefreshIntervalHours(NaN)).toThrow(RangeError);
+    StorageService.set('playlist_refresh_interval_hours', '12');
+    StorageService.set('epg_refresh_interval_hours', {});
+    expect(StorageService.getPlaylistRefreshIntervalHours()).toBe(6);
+    expect(StorageService.getEpgRefreshIntervalHours()).toBe(6);
+  });
+
+  it('validates and persists the Xtream catalog refresh interval', () => {
+    expect(StorageService.getXtreamCatalogRefreshIntervalHours()).toBe(6);
+    for (const hours of XTREAM_CATALOG_REFRESH_HOUR_OPTIONS) {
+      StorageService.setXtreamCatalogRefreshIntervalHours(hours);
+      expect(StorageService.getXtreamCatalogRefreshIntervalHours()).toBe(hours);
+      expect(StorageService.getXtreamCatalogRefreshIntervalMs())
+        .toBe(hours * 60 * 60 * 1000);
+    }
+    expect(() => StorageService.setXtreamCatalogRefreshIntervalHours(0))
+      .toThrow(RangeError);
+    StorageService.set('xtream_catalog_refresh_interval_hours', '12');
+    expect(StorageService.getXtreamCatalogRefreshIntervalHours()).toBe(6);
+  });
+
+  it('defaults live preview to off without writing a preference', () => {
+    expect(StorageService.getLivePreview()).toBe(false);
+    expect(localStorage.getItem('iptv_live_preview')).toBeNull();
+  });
+
+  it('validates and persists the animation mode', () => {
+    expect(StorageService.getAnimationMode()).toBe('reduced');
+    StorageService.setAnimationMode('full');
+    expect(StorageService.getAnimationMode()).toBe('full');
+    StorageService.setAnimationMode('essential');
+    expect(StorageService.getAnimationMode()).toBe('essential');
+    expect(() => StorageService.setAnimationMode('invalid' as 'essential'))
+      .toThrow(RangeError);
+    StorageService.set('animation_mode', 'invalid');
+    expect(StorageService.getAnimationMode()).toBe('reduced');
+  });
+
+  it('persists live preview on and off independently from autoplay and sources', () => {
+    StorageService.setAutoPlay(true);
+    StorageService.setPlaylists([{ id: 'p1', name: 'P1', url: 'http://host/a' }]);
+    StorageService.setLivePreview(true);
+    expect(localStorage.getItem('iptv_live_preview')).toBe('true');
+    expect(StorageService.getLivePreview()).toBe(true);
+
+    StorageService.setPlaylists([{ id: 'p2', name: 'P2', url: 'http://host/b' }]);
+    StorageService.setAutoPlay(false);
+    expect(StorageService.getLivePreview()).toBe(true);
+
+    StorageService.setLivePreview(false);
+    expect(localStorage.getItem('iptv_live_preview')).toBe('false');
+    expect(StorageService.getLivePreview()).toBe(false);
+    expect(StorageService.getAutoPlay()).toBe(false);
+  });
+
+  it.each(['null', '"true"', '1', '{}', 'invalid'])(
+    'keeps live preview off for a malformed stored preference %s',
+    (value) => {
+      localStorage.setItem('iptv_live_preview', value);
+      expect(StorageService.getLivePreview()).toBe(false);
+    },
+  );
+
+  it('reads persisted live preview on upgrade and clears it on reset', () => {
+    localStorage.setItem('iptv_live_preview', 'true');
+    expect(StorageService.getLivePreview()).toBe(true);
+    StorageService.clearAll();
+    expect(StorageService.getLivePreview()).toBe(false);
   });
 
   it('clears all local storage when resetting the app', () => {
@@ -59,10 +191,35 @@ describe('StorageService', () => {
     });
   });
 
-  it('defaults the EPG url to an empty string and round-trips it', () => {
-    expect(StorageService.getEpgUrl()).toBe('');
-    StorageService.setEpgUrl('http://epg/guide.xml');
-    expect(StorageService.getEpgUrl()).toBe('http://epg/guide.xml');
+  it('defaults manual EPG sources to an empty list and round-trips them', () => {
+    expect(StorageService.getManualEpgSources()).toEqual([]);
+    StorageService.setManualEpgSources([
+      { url: 'http://epg/guide.xml', playlistIds: [] },
+    ]);
+    expect(StorageService.getManualEpgSources()).toEqual([
+      { url: 'http://epg/guide.xml', playlistIds: [] },
+    ]);
+  });
+
+  it('migrates the legacy EPG URL and sanitizes manual EPG sources', () => {
+    localStorage.setItem('iptv_epg_url', JSON.stringify('http://host/legacy.xml'));
+    expect(StorageService.getManualEpgSources()).toEqual([
+      { url: 'http://host/legacy.xml', playlistIds: [] },
+    ]);
+    expect(localStorage.getItem('iptv_epg_url')).toBeNull();
+    expect(localStorage.getItem('iptv_manual_epg_sources')).not.toBeNull();
+
+    StorageService.setManualEpgSources([
+      { url: ' http://host/a.xml ', playlistIds: ['p1', 'p1'] },
+      { url: 'http://host/a.xml', playlistIds: ['p2'] },
+      { url: 'http://host/b.xml', playlistIds: [] },
+      { url: '', playlistIds: ['p3'] },
+    ]);
+
+    expect(StorageService.getManualEpgSources()).toEqual([
+      { url: 'http://host/a.xml', playlistIds: ['p1', 'p2'] },
+      { url: 'http://host/b.xml', playlistIds: [] },
+    ]);
   });
 
   it('round-trips sanitized EPG source offsets and omits zero values', () => {
@@ -124,7 +281,9 @@ describe('StorageService', () => {
   });
 
   it('namespaces keys with the configured storage prefix', () => {
-    StorageService.setEpgUrl('http://epg/x.xml');
+    StorageService.setManualEpgSources([
+      { url: 'http://epg/x.xml', playlistIds: [] },
+    ]);
     const prefixed = Object.keys(localStorage).filter(k => k.startsWith('iptv_'));
     expect(prefixed.length).toBeGreaterThan(0);
   });

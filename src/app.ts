@@ -7,6 +7,7 @@ import { ChannelHealthService } from './services/channel-health';
 import { StorageService } from './services/storage-service';
 import {
   clearAllCachedData,
+  clearCachedCatalog,
   clearCachedPlaylist,
   flushCacheWrites,
 } from './services/idb-cache';
@@ -15,6 +16,7 @@ import { setServicePort } from './services/service-http';
 import { isLunaAvailable, lunaRequest, type LunaRequestHandle } from './services/luna';
 import { ChannelList } from './components/channel-list';
 import { Player } from './components/player';
+import { LivePreview } from './components/live-preview';
 import { EpgGrid } from './components/epg-grid';
 import { Settings, type SaveAction } from './components/settings';
 import { Sidebar } from './components/sidebar';
@@ -30,12 +32,21 @@ import { ReminderPrompt } from './components/reminder-prompt';
 import { ReminderManager } from './components/reminder-manager';
 import { setDisplayTz } from './utils/time';
 import { initTheme, applyTheme, applyOverlayStyle, applyTextSize } from './services/theme-service';
+import { applyAnimationMode } from './services/motion-service';
 import { channelKey } from './utils/channel';
 import { isSourceEnabled } from './utils/playlist';
 import { truncate } from './utils/text';
 import { $, show, hide } from './utils/dom';
 import { createLogger, installGlobalErrorHandlers, logEnvironment } from './utils/logger';
-import type { Action, NumberEvent, CatchupInfo, ChannelScope, EpgSource, PlaylistEntry } from './types';
+import type {
+  Action,
+  NumberEvent,
+  CatchupInfo,
+  Channel,
+  ChannelScope,
+  EpgSource,
+  PlaylistEntry,
+} from './types';
 import { getLocale, initLocale, resolveLocale, setLocale, t, tp } from './i18n';
 
 const log = createLogger('App');
@@ -50,6 +61,7 @@ class App {
   private viewBeforeSearch: ViewName | null = null;
   private channelList!: ChannelList;
   private player!: Player;
+  private livePreview!: LivePreview;
   private epgGrid!: EpgGrid;
   private settings!: Settings;
   private sidebar!: Sidebar;
@@ -67,7 +79,11 @@ class App {
   private bundledServiceStarting = false;
   private serviceEventsSubscription: LunaRequestHandle | null = null;
   private deviceSetupSync = Promise.resolve();
-  private epgRefreshTimer: ReturnType<typeof setInterval> | null = null;
+  private playlistRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  private playlistRefreshIntervalMs: number | null | undefined;
+  private playlistRefreshPromise: Promise<void> | null = null;
+  private epgRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  private epgRefreshIntervalMs: number | null | undefined;
   private epgChannelReloadTimer: ReturnType<typeof setTimeout> | null = null;
 
   async init(): Promise<void> {
@@ -76,6 +92,7 @@ class App {
     await StorageService.init();
     StorageService.setWriteFailureHandler(() => showToast(t('app.saveFailed')));
     initLocale(StorageService.getLocalePreference());
+    applyAnimationMode(StorageService.getAnimationMode());
     const initialLoadingText = $('#loading-text');
     if (initialLoadingText) initialLoadingText.textContent = t('common.loading');
     initTheme();
@@ -92,25 +109,36 @@ class App {
     };
 
     this.channelList = new ChannelList(
-      this.views.channels,
-      (idx, catchup, scope) => this.playChannel(idx, catchup, scope),
-      () => {
-        this.player.syncCurrentIndex();
-        this.scheduleEpgReload();
-      },
-      () => this.scheduleEpgReload(),
-      () => {
-        void this.search.refreshPrograms();
+      $('#channel-browser')!,
+      {
+        onChannelSelect: (idx, catchup, scope, mode) =>
+          this.livePreview.selectChannel(idx, catchup, scope, mode),
+        onChannelsChanged: () => {
+          this.player.syncCurrentIndex();
+          this.scheduleEpgReload();
+        },
+        onEpgMappingChanged: () => this.scheduleEpgReload(),
+        onEpgOffsetChanged: () => {
+          void this.search.refreshPrograms();
+        },
+        onEnterPreview: () => this.livePreview?.focusControls() ?? false,
+        onListFocus: () => this.livePreview?.leaveControls(false),
+        getPreviewHintState: () => this.livePreview?.hintState() ?? 'off',
+        onEnterManagement: () => this.livePreview?.close(),
       },
     );
     this.player = new Player(this.views.player, () => {
       this.channelList.render();
       this.showView('channels');
-    }, (idx, catchupStart) => this.channelList.setPlaying(idx, catchupStart),
+    }, (idx, catchupStart) => {
+      this.channelList.setPlaying(idx, catchupStart);
+      if (this.livePreview?.isShowing) this.channelList.render(false);
+    },
     () => !this.sidebar.visible && !this.menu.visible,
     () => {
       this.sidebar.refresh();
-    });
+    }, () => this.livePreview?.refresh(),
+    () => this.livePreview?.canResumePlayback() ?? true);
     this.epgGrid = new EpgGrid(
       this.views.epg,
       (idx, catchup, scope) => this.playChannel(idx, catchup, scope),
@@ -134,6 +162,28 @@ class App {
     );
 
     this.player.init($('#video-player') as HTMLVideoElement);
+    this.livePreview = new LivePreview($('#live-preview')!, {
+      channelView: this.views.channels,
+      player: this.player,
+      channelList: this.channelList,
+      getCurrentView: () => this.viewStack[this.viewStack.length - 1],
+      showChannels: preserveFocus => this.showView('channels', preserveFocus),
+      showPlayer: () => this.showView('player'),
+      playFullscreen: (index, catchup, scope) => this.playChannel(index, catchup, scope),
+      blurTabBar: () => this.tabBar.blur(),
+      expansionBlocked: () => this.reminderPrompt.visible,
+      isFavorite: channel => StorageService.getFavorites().includes(channelKey(channel)),
+      toggleFavorite: channel => this.toggleChannelFavorite(channel),
+    });
+    window.addEventListener('resize', () => this.livePreview.refreshLayout());
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        this.livePreview.suspend();
+      } else {
+        this.livePreview.refresh();
+        this.livePreview.refreshLayout();
+      }
+    });
 
     this.sidebar = new Sidebar(
       this.views.player,
@@ -558,11 +608,10 @@ class App {
 
   private epgSources(): EpgSource[] {
     if (!StorageService.getPlaylists().some(isSourceEnabled)) return [];
-    const manualUrl = StorageService.getEpgUrl();
+    const manual = StorageService.getManualEpgSources()
+      .map(source => ({ ...source, kind: 'manual' as const }));
     const discovered = PlaylistService.epgSources;
-    const sources: EpgSource[] = manualUrl && !discovered.some((source) => source.url === manualUrl)
-      ? [{ url: manualUrl, playlistIds: [], kind: 'manual' }, ...discovered]
-      : discovered;
+    const sources: EpgSource[] = [...manual, ...discovered];
     const offsets = StorageService.getEpgOffsets();
     return sources.map(source => ({ ...source, offsetMinutes: offsets[source.url] ?? 0 }));
   }
@@ -595,15 +644,137 @@ class App {
       clearTimeout(this.epgChannelReloadTimer);
       this.epgChannelReloadTimer = null;
     }
-    if (this.epgRefreshTimer === null) return;
-    clearInterval(this.epgRefreshTimer);
-    this.epgRefreshTimer = null;
+    this.epgRefreshIntervalMs = undefined;
+    if (this.epgRefreshTimer !== null) {
+      clearTimeout(this.epgRefreshTimer);
+      this.epgRefreshTimer = null;
+    }
   }
 
-  private async loadData(): Promise<void> {
+  private scheduleEpgRefresh(force = false, delayOverride?: number): void {
+    const intervalMs = StorageService.getEpgRefreshIntervalMs();
+    const shouldRun = intervalMs !== null && this.epgSources().length > 0;
+    if (!force
+      && this.epgRefreshIntervalMs === intervalMs
+      && ((shouldRun && this.epgRefreshTimer !== null)
+        || (!shouldRun && this.epgRefreshTimer === null))) {
+      return;
+    }
+    if (this.epgRefreshTimer !== null) {
+      clearTimeout(this.epgRefreshTimer);
+      this.epgRefreshTimer = null;
+    }
+    this.epgRefreshIntervalMs = intervalMs;
+    if (!shouldRun || intervalMs === null) return;
+    const delayMs = delayOverride ?? EpgService.getNextRefreshDelayMs(intervalMs);
+    this.epgRefreshTimer = setTimeout(() => {
+      this.epgRefreshTimer = null;
+      EpgService.refresh(() => this.refreshEpgDependentViews())
+        .then((complete) => {
+          this.refreshEpgDependentViews();
+          this.scheduleEpgRefresh(
+            true,
+            complete ? undefined : StorageService.getEpgRefreshIntervalMs() ?? undefined,
+          );
+        }, (err) => {
+          log.error('EPG refresh failed:', err);
+          this.scheduleEpgRefresh(true, StorageService.getEpgRefreshIntervalMs() ?? undefined);
+        });
+    }, delayMs);
+  }
+
+  private stopPlaylistRefresh(): void {
+    if (this.playlistRefreshTimer !== null) {
+      clearTimeout(this.playlistRefreshTimer);
+      this.playlistRefreshTimer = null;
+    }
+    this.playlistRefreshIntervalMs = undefined;
+  }
+
+  private schedulePlaylistRefresh(force = false, delayOverride?: number): void {
+    const intervalMs = StorageService.getPlaylistRefreshIntervalMs();
+    const shouldRun = intervalMs !== null
+      && StorageService.getPlaylists().some(isSourceEnabled);
+    if (!force
+      && this.playlistRefreshIntervalMs === intervalMs
+      && ((shouldRun && this.playlistRefreshTimer !== null)
+        || (!shouldRun && this.playlistRefreshTimer === null))) {
+      return;
+    }
+    if (this.playlistRefreshTimer !== null) {
+      clearTimeout(this.playlistRefreshTimer);
+      this.playlistRefreshTimer = null;
+    }
+    this.playlistRefreshIntervalMs = intervalMs;
+    if (!shouldRun || intervalMs === null) return;
+    const delayMs = delayOverride ?? PlaylistService.getNextRefreshDelayMs(intervalMs);
+    this.playlistRefreshTimer = setTimeout(() => {
+      this.playlistRefreshTimer = null;
+      void this.queuePlaylistRefresh();
+    }, delayMs);
+  }
+
+  private queuePlaylistRefresh(): Promise<void> {
+    if (this.playlistRefreshPromise) return this.playlistRefreshPromise;
+    const onSettled = () => {
+      this.playlistRefreshPromise = null;
+      this.schedulePlaylistRefresh(
+        true,
+        StorageService.getPlaylistRefreshIntervalMs() ?? undefined,
+      );
+    };
+    this.playlistRefreshPromise = this.refreshPlaylistInBackground()
+      .then(() => {
+        onSettled();
+      }, (err) => {
+        onSettled();
+        throw err;
+      });
+    return this.playlistRefreshPromise;
+  }
+
+  private async refreshPlaylistInBackground(): Promise<void> {
+    try {
+      if (!StorageService.getPlaylists().some(isSourceEnabled)) return;
+      await PlaylistService.refresh(undefined, { preserveOnFailure: true });
+      this.player.syncCurrentIndex();
+      await ChannelHealthService.initialize();
+
+      const epgSources = this.epgSources();
+      if (epgSources.length) {
+        await EpgService.load(
+          epgSources,
+          PlaylistService.getEpgEligibleChannels(),
+          () => this.refreshEpgDependentViews(),
+        );
+        await EpgService.refresh(() => this.refreshEpgDependentViews());
+        this.refreshEpgDependentViews();
+      } else {
+        EpgService.reset();
+        this.refreshEpgDependentViews();
+      }
+      this.scheduleEpgRefresh(true);
+
+      const playlists = StorageService.getPlaylists();
+      const xtreamAccounts = playlists
+        .filter((playlist) =>
+          playlist.source === 'xtream' && playlist.xtream && isSourceEnabled(playlist));
+      this.tabBar.setSections(xtreamAccounts.length > 0);
+      this.tabBar.setAccounts(xtreamAccounts, this.activeXtreamAccount()?.id ?? '');
+      this.channelList.render();
+      this.sidebar.refresh();
+      this.livePreview?.refresh();
+    } catch (err) {
+      log.error('Automatic playlist refresh failed:', err);
+    }
+  }
+
+  private async loadData(forceEpgRefresh = false): Promise<void> {
     const done = log.time('loadData');
     show(this.views.loading);
     this.stopEpgRefresh();
+    this.stopPlaylistRefresh();
+    if (this.playlistRefreshPromise) await this.playlistRefreshPromise;
 
     this.applyDisplayTz();
     this.epgGrid.resetDay(); // re-pick today; a tz change invalidates the remembered day index
@@ -641,6 +812,7 @@ class App {
           kept: progress.channelsKept,
         });
       });
+      this.player.syncCurrentIndex();
       await ChannelHealthService.initialize();
       log.info('Channels loaded:', PlaylistService.channels.length,
         '| groups:', PlaylistService.groups.length,
@@ -684,19 +856,31 @@ class App {
       }
 
       if (epgSources.length) {
-        EpgService.refresh(() => this.refreshEpgDependentViews())
-          .then(() => {
-            this.refreshEpgDependentViews();
-          })
-          .catch(err => log.error('EPG load failed:', err));
-        this.epgRefreshTimer = setInterval(() =>
+        if (forceEpgRefresh) {
+          EpgService.refresh(() => this.refreshEpgDependentViews(), true)
+            .then(() => {
+              this.refreshEpgDependentViews();
+              this.scheduleEpgRefresh(
+                true,
+                StorageService.getEpgRefreshIntervalMs() ?? undefined,
+              );
+            }, (err) => {
+              log.error('EPG load failed:', err);
+              this.scheduleEpgRefresh(
+                true,
+                StorageService.getEpgRefreshIntervalMs() ?? undefined,
+              );
+            });
+        } else if (StorageService.getEpgRefreshIntervalMs() === null) {
           EpgService.refresh(() => this.refreshEpgDependentViews())
-          .then(() => {
-            this.refreshEpgDependentViews();
-          })
-          .catch(err => log.error('EPG refresh failed:', err)),
-        CONFIG.EPG_REFRESH_INTERVAL);
+            .then(() => {
+              this.refreshEpgDependentViews();
+            }, err => log.error('Initial EPG load failed:', err));
+        } else {
+          this.scheduleEpgRefresh(true);
+        }
       }
+      this.schedulePlaylistRefresh(true);
     } catch (err) {
       log.error('loadData failed:', err);
       this.showView('settings');
@@ -708,7 +892,8 @@ class App {
     }
   }
 
-  private showView(name: ViewName): void {
+  private showView(name: ViewName, preserveChannelFocus = false): void {
+    this.livePreview?.beforeViewChange(name);
     if (name !== 'channels' && this.channelList.isEditing) this.channelList.exitEditMode();
     // Re-assert the persisted theme on every view transition. This reverts any
     // unsaved live preview when Settings closes (Back / section switch / Cancel)
@@ -716,6 +901,7 @@ class App {
     applyTheme(StorageService.getTheme());
     applyOverlayStyle(StorageService.getOverlayStyle());
     applyTextSize(StorageService.getTextSize());
+    applyAnimationMode(StorageService.getAnimationMode());
     this.player.closeSubtitleSearch(); // never let the subtitle overlay linger across a view change
     this.player.closeSubtitleOffset(); // never let the subtitle-sync overlay linger across a view change
     this.epgGrid.dismissPrompt(); // never let the catch-up prompt linger across a view change
@@ -728,7 +914,7 @@ class App {
     }
 
     if (name === 'player') {
-      this.viewStack.push(name);
+      if (this.viewStack[this.viewStack.length - 1] !== name) this.viewStack.push(name);
     } else if (name !== this.viewStack[this.viewStack.length - 1]) {
       this.viewStack = [name];
     }
@@ -741,12 +927,13 @@ class App {
     // Focus the channel entry point on entry — but not while the tab bar holds
     // focus (a live Left/Right preview updates the view beneath it without
     // stealing the focus ring). No-op on first load (render runs after).
-    if (name === 'channels' && !this.tabBar.focused) this.channelList.highlightEntryPoint();
+    if (name === 'channels' && !this.tabBar.focused && !preserveChannelFocus) this.channelList.highlightEntryPoint();
 
     // Keep the active tab bound to the shown section view (so returning from
     // Settings, EPG, the player, etc. updates the underline). Skipped while the
     // search box is open — it overlays other views but stays "Search".
     if (section && !this.tabBar.searchOpen) this.tabBar.setActive(section);
+    this.livePreview?.refresh();
   }
 
   // Map a tab-bar section to its view and show it (Live = the channels view).
@@ -755,10 +942,15 @@ class App {
     if (section !== 'movies' && section !== 'search') this.movies.deactivate();
     if (section !== 'series' && section !== 'search') this.series.deactivate();
     if (section !== 'search') this.search.deactivate();
-    // Leaving the player via the tab bar (the pointer can reveal it over the
-    // player) must tear down playback, like Back / red / blue do.
+    if (section === 'live') {
+      if (!this.livePreview.returnFromFullscreen(false)) {
+        this.player.stop();
+        this.showView('channels');
+        this.channelList.render();
+      }
+      return;
+    }
     this.player.stop();
-    if (section === 'live') { this.showView('channels'); this.channelList.render(); return; }
     if (section === 'epg') { this.openEpg(); return; }
     if (section === 'movies') {
       this.showView('movies');
@@ -847,6 +1039,7 @@ class App {
   private refreshEpgDependentViews(): void {
     this.applyDisplayTz();
     this.channelList.render();
+    this.livePreview.refresh();
     void this.search.refreshPrograms();
   }
 
@@ -1088,7 +1281,7 @@ class App {
         } else if (this.menu.visible) {
           // Let the menu step out of its audio sub-menu before closing.
           if (!this.menu.handleBack()) this.menu.hide();
-        } else {
+        } else if (!this.livePreview.returnFromFullscreen(true)) {
           this.player.handleAction('back');
         }
         return;
@@ -1119,6 +1312,7 @@ class App {
         return;
       }
       if (currentView === 'channels') {
+        if (this.livePreview.handleBack()) return;
         if (this.channelList.handleBack()) return;
         const now = Date.now();
         if (now - this.backPressTime < 3000) {
@@ -1134,6 +1328,7 @@ class App {
     // Delegate to active view
     switch (currentView) {
       case 'channels': {
+        if (this.livePreview.handleAction(action)) break;
         const moved = this.channelList.handleAction(action, event);
         if (action === 'up' && !moved && this.tabBar.shown) this.tabBar.focus();
         break;
@@ -1270,6 +1465,10 @@ class App {
   private togglePlayingFavorite(): void {
     const ch = this.player.getCurrentChannel();
     if (!ch) return;
+    this.toggleChannelFavorite(ch);
+  }
+
+  private toggleChannelFavorite(ch: Channel): void {
     const key = channelKey(ch);
     StorageService.toggleFavorite(key);
     showToast(StorageService.getFavorites().includes(key)
@@ -1313,15 +1512,19 @@ class App {
       void SetupClient.publishState();
     }
     if (action === 'reload') {
-      await clearCachedPlaylist();
+      this.search.invalidateCatalog();
+      await Promise.all([clearCachedPlaylist(), clearCachedCatalog()]);
       this.showView('channels');
-      await this.loadData();
+      await this.loadData(true);
       return;
     }
     // 'apply': only display settings changed — re-apply + re-render, no re-fetch.
     if (action === 'apply') {
+      this.search.invalidateCatalog();
       this.applyDisplayTz();
       this.epgGrid.resetDay();
+      this.scheduleEpgRefresh();
+      this.schedulePlaylistRefresh();
     }
     this.channelList.render();
     this.showView('channels');

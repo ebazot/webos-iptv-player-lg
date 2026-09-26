@@ -85,6 +85,7 @@ vi.mock('./toast', () => ({ showToast: toastMock.showToast }));
 vi.mock('../services/channel-health', () => ({ ChannelHealthService: healthMock }));
 
 import { ChannelList } from './channel-list';
+import { CONFIG } from '../config';
 import { setLocale } from '../i18n';
 import { channelKey } from '../utils/channel';
 import { UNCATEGORIZED_GROUP } from '../types';
@@ -168,7 +169,7 @@ beforeEach(() => {
   container = document.createElement('div');
   document.body.appendChild(container);
   onSelect = vi.fn();
-  list = new ChannelList(container, onSelect);
+  list = new ChannelList(container, { onChannelSelect: onSelect });
 });
 
 function channelItems(): HTMLElement[] {
@@ -180,6 +181,68 @@ function hover(el: HTMLElement): void {
 }
 
 describe('ChannelList.render', () => {
+  it('omits the live-preview toolbar when the setting is off', () => {
+    list = new ChannelList(container, {
+      onChannelSelect: onSelect,
+      getPreviewHintState: () => 'off',
+    });
+    list.render();
+    expect(container.querySelector('.preview-list-hints')).toBeNull();
+  });
+
+  it('keeps one stable live-preview hint set across list and control focus', () => {
+    list = new ChannelList(container, {
+      onChannelSelect: onSelect,
+      getPreviewHintState: () => 'active',
+    });
+    list.render();
+    expect(container.querySelector('.preview-list-hints')?.textContent).toContain('Open preview');
+    expect(container.querySelector('.preview-list-hints')?.textContent).toContain('Preview controls');
+    expect(container.querySelector('[data-preview-list-close] .key-back svg')).not.toBeNull();
+    expect(container.querySelector('[data-preview-list-close]')?.textContent).toContain('Close');
+    const hints = container.querySelector('.preview-list-hints')?.innerHTML;
+    list.setPreviewFocused(true);
+    expect(container.querySelector('.preview-list-hints')?.innerHTML).toBe(hints);
+    list.setPreviewFocused(false);
+    expect(container.querySelector('.preview-list-hints')?.innerHTML).toBe(hints);
+  });
+
+  it('shows the preview scrollbar while scrolling and hides it after a delay', () => {
+    vi.useFakeTimers();
+    document.body.classList.add('has-live-preview');
+    try {
+      list.render();
+      const main = container.querySelector<HTMLElement>('.channel-main')!;
+      const indicator = container.querySelector<HTMLElement>('.channel-scroll-indicator')!;
+      const thumb = indicator.querySelector<HTMLElement>('.channel-scroll-thumb')!;
+      Object.defineProperties(main, {
+        clientHeight: { configurable: true, value: 400 },
+        scrollHeight: { configurable: true, value: 1000 },
+        scrollTop: { configurable: true, value: 200, writable: true },
+      });
+      Object.defineProperty(indicator, 'clientHeight', { configurable: true, value: 300 });
+
+      main.dispatchEvent(new Event('scroll'));
+
+      expect(indicator.classList.contains('visible')).toBe(true);
+      expect(thumb.style.height).toBe('120px');
+      expect(thumb.style.transform).toBe('translateY(60px)');
+      vi.advanceTimersByTime(CONFIG.CHANNEL_SCROLLBAR_HIDE_MS);
+      expect(indicator.classList.contains('visible')).toBe(false);
+    } finally {
+      document.body.classList.remove('has-live-preview');
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not activate the custom scrollbar outside preview', () => {
+    list.render();
+    const main = container.querySelector<HTMLElement>('.channel-main')!;
+    main.dispatchEvent(new Event('scroll'));
+    expect(container.querySelector('.channel-scroll-indicator')?.classList.contains('visible'))
+      .toBe(false);
+  });
+
   // With no channels the entry point falls through to the first focusable,
   // taken in DOM order with no geometry to fall back on — so measurement is
   // the only thing keeping focus off an invisible control. Rects are stubbed
@@ -370,7 +433,7 @@ describe('ChannelList.render', () => {
     data.favorites = [channelKey(data.channels[0])];
     list.render();
     const alpha = channelItems()[0].querySelector('.channel-name')!;
-    expect(alpha.textContent).toContain('★');
+    expect(alpha.querySelector('.favorite-glyph.set')).not.toBeNull();
   });
 
   it('shows an empty state when a group has no channels', () => {
@@ -442,6 +505,28 @@ describe('ChannelList.render', () => {
     expect(channelItems()).toHaveLength(1);
   });
 
+  it('restores Recently Watched focus with one CSS-owned scroll call', () => {
+    recentMock.items = [{
+      kind: 'live',
+      channel: data.channels[0],
+      channelIndex: 0,
+      updatedAt: 1000,
+    }];
+    list.render();
+    hover(container.querySelector<HTMLElement>('[data-group="builtin:recently-watched"]')!);
+    list.handleAction('select');
+    hover(channelItems()[0]);
+    const scrollIntoView = vi.mocked(Element.prototype.scrollIntoView);
+    scrollIntoView.mockClear();
+    list.render();
+
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+    expect(scrollIntoView).toHaveBeenLastCalledWith({
+      block: 'nearest',
+      behavior: 'auto',
+    });
+  });
+
   it('shows the Recently Watched empty state', () => {
     list.render();
     hover(container.querySelector<HTMLElement>('[data-group="builtin:recently-watched"]')!);
@@ -469,6 +554,34 @@ describe('ChannelList.render', () => {
     expect(container.querySelector('[data-group="builtin:all"]')?.classList.contains('active'))
       .toBe(true);
     expect(channelItems()).toHaveLength(3);
+  });
+
+  it('notifies the app before entering channel edit mode', () => {
+    const onEnterManagement = vi.fn();
+    list = new ChannelList(container, {
+      onChannelSelect: onSelect,
+      onEnterManagement,
+    });
+    list.render();
+    list.enterEditMode('builtin:all');
+    expect(onEnterManagement).toHaveBeenCalledOnce();
+    expect(list.isEditing).toBe(true);
+  });
+
+  it('notifies the app before entering favorite management', () => {
+    const onEnterManagement = vi.fn();
+    data.favorites = [channelKey(data.channels[0])];
+    list = new ChannelList(container, {
+      onChannelSelect: onSelect,
+      onEnterManagement,
+    });
+    list.render();
+    hover(container.querySelector<HTMLElement>('[data-group="builtin:favorites"]')!);
+    list.handleAction('select');
+    hover(container.querySelector<HTMLElement>('[data-favorite-manage]')!);
+    list.handleAction('select');
+    expect(onEnterManagement).toHaveBeenCalledOnce();
+    expect(container.querySelector('.favorite-hints')).not.toBeNull();
   });
 
   it('escapes a malicious channel name instead of rendering live HTML (XSS)', () => {
@@ -509,7 +622,12 @@ describe('ChannelList interaction', () => {
   it('selecting a focused channel plays it', () => {
     hover(channelItems()[1]);
     list.handleAction('select');
-    expect(onSelect).toHaveBeenCalledWith(1, undefined, { group: 'builtin:all', playlist: undefined });
+    expect(onSelect).toHaveBeenCalledWith(
+      1,
+      undefined,
+      { group: 'builtin:all', playlist: undefined },
+      'expand-current',
+    );
   });
 
   it('reports virtual moves so Up does not hand focus to the tab bar', () => {
@@ -518,7 +636,91 @@ describe('ChannelList interaction', () => {
       .toBe('1');
     expect(list.handleAction('up')).toBe(true);
     list.handleAction('select');
-    expect(onSelect).toHaveBeenCalledWith(0, undefined, { group: 'builtin:all', playlist: undefined });
+    expect(onSelect).toHaveBeenCalledWith(
+      0,
+      undefined,
+      { group: 'builtin:all', playlist: undefined },
+      'expand-current',
+    );
+  });
+
+  it('follows the visual source, group, channel order', () => {
+    playlistMock.playlistTabs = [
+      { id: 'a', name: 'A' },
+      { id: 'b', name: 'B' },
+    ];
+    list.render();
+
+    hover(container.querySelector<HTMLElement>('[data-group-position="0"]')!);
+    expect(list.handleAction('up')).toBe(true);
+    expect(container.querySelector('.playlist-tab.active')?.classList.contains('focused'))
+      .toBe(true);
+    expect(list.handleAction('down')).toBe(true);
+    const group = container.querySelector<HTMLElement>('.group-item.active')!;
+    expect(group.classList.contains('focused')).toBe(true);
+    expect(list.handleAction('right')).toBe(true);
+    expect(channelItems()[0].classList.contains('focused')).toBe(true);
+    expect(list.handleAction('left')).toBe(true);
+    expect(container.querySelector('.group-item.active')?.classList.contains('focused'))
+      .toBe(true);
+  });
+
+  it('hands Up from the first channel to the tab bar instead of jumping diagonally', () => {
+    playlistMock.playlistTabs = [
+      { id: 'a', name: 'A' },
+      { id: 'b', name: 'B' },
+    ];
+    list.render();
+
+    expect(list.handleAction('up')).toBe(false);
+    expect(channelItems()[0].classList.contains('focused')).toBe(true);
+  });
+
+  it('moves horizontally within the source list without jumping regions', () => {
+    playlistMock.playlistTabs = [
+      { id: 'a', name: 'A' },
+      { id: 'b', name: 'B' },
+    ];
+    list.render();
+    hover(container.querySelector<HTMLElement>('[data-group-position="0"]')!);
+    list.handleAction('up');
+
+    expect(list.handleAction('right')).toBe(true);
+    expect(container.querySelector('[data-playlist="a"]')?.classList.contains('focused'))
+      .toBe(true);
+    expect(list.handleAction('right')).toBe(true);
+    expect(container.querySelector('[data-playlist="b"]')?.classList.contains('focused'))
+      .toBe(true);
+    expect(list.handleAction('right')).toBe(true);
+    expect(container.querySelector('[data-playlist="b"]')?.classList.contains('focused'))
+      .toBe(true);
+  });
+
+  it('reveals the active group when source selection follows a deep group scroll', () => {
+    const originalGroups = playlistMock.getGroupsForPlaylist;
+    playlistMock.playlistTabs = [
+      { id: 'a', name: 'A' },
+      { id: 'b', name: 'B' },
+    ];
+    playlistMock.getGroupsForPlaylist = () =>
+      Array.from({ length: 50 }, (_, index) => `Group ${String(index)}`);
+    playlistMock.groupsRevision++;
+    try {
+      list.render();
+      const groupList = container.querySelector<HTMLElement>('.group-list')!;
+      groupList.scrollTop = 2000;
+      list.render(false);
+      expect(container.querySelector('[data-group-position="0"]')).toBeNull();
+
+      hover(container.querySelector<HTMLElement>('[data-playlist="a"]')!);
+      list.handleAction('select');
+      expect(list.handleAction('down')).toBe(true);
+      expect(container.querySelector('[data-group-position="0"]')?.classList.contains('focused'))
+        .toBe(true);
+    } finally {
+      playlistMock.getGroupsForPlaylist = originalGroups;
+      playlistMock.groupsRevision++;
+    }
   });
 
   it('does not rerender when the next virtual item is already mounted', () => {
@@ -544,7 +746,12 @@ describe('ChannelList interaction', () => {
     list.handleAction('select');
     hover(channelItems()[0]);
     list.handleAction('select');
-    expect(onSelect).toHaveBeenCalledWith(1, undefined, { group: 'builtin:recently-watched', playlist: undefined });
+    expect(onSelect).toHaveBeenCalledWith(
+      1,
+      undefined,
+      { group: 'builtin:recently-watched', playlist: undefined },
+      'expand-current',
+    );
   });
 
   it('places recent live health before the Live badge', () => {
@@ -637,7 +844,12 @@ describe('ChannelList interaction', () => {
     document.elementFromPoint = () => target;
     container.dispatchEvent(new MouseEvent('click', { clientX: 100, clientY: 50, bubbles: true }));
     document.elementFromPoint = orig;
-    expect(onSelect).toHaveBeenCalledWith(1, undefined, { group: 'builtin:all', playlist: undefined });
+    expect(onSelect).toHaveBeenCalledWith(
+      1,
+      undefined,
+      { group: 'builtin:all', playlist: undefined },
+      'expand-current',
+    );
   });
 
   it('switches group on a pointer click over a group item', () => {
@@ -674,7 +886,12 @@ describe('ChannelList interaction', () => {
 
   it('a number action plays that channel (1-based)', () => {
     list.handleAction('number', { number: 2 });
-    expect(onSelect).toHaveBeenCalledWith(1, undefined, { group: 'builtin:all', playlist: undefined });
+    expect(onSelect).toHaveBeenCalledWith(
+      1,
+      undefined,
+      { group: 'builtin:all', playlist: undefined },
+      'fullscreen',
+    );
   });
 
   it('a number action focuses and marks the channel it tuned', () => {
@@ -690,7 +907,12 @@ describe('ChannelList interaction', () => {
 
     list.handleAction('number', { number: 1 }); // Alpha, outside the Sports group
 
-    expect(onSelect).toHaveBeenCalledWith(0, undefined, { group: 'builtin:all', playlist: undefined });
+    expect(onSelect).toHaveBeenCalledWith(
+      0,
+      undefined,
+      { group: 'builtin:all', playlist: undefined },
+      'fullscreen',
+    );
     expect(channelItems()).toHaveLength(3);
     expect(channelItems()[0].classList.contains('focused')).toBe(true);
     expect(channelItems()[0].classList.contains('playing')).toBe(true);
@@ -751,7 +973,7 @@ describe('ChannelList listener lifecycle', () => {
     const c = document.createElement('div');
     document.body.appendChild(c);
     const spy = vi.spyOn(c, 'addEventListener');
-    const l = new ChannelList(c, vi.fn());
+    const l = new ChannelList(c, { onChannelSelect: vi.fn() });
     const initialCount = spy.mock.calls.filter(([type]) => type === 'nav:hover').length;
     l.render();
     l.render();

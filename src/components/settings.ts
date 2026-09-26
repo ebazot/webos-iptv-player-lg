@@ -1,8 +1,15 @@
-import type { Action, ChannelCycleMode, EpgSource, NavDirection, PlaylistEntry, TzMode } from '../types';
+import type { Action, ChannelCycleMode, EpgSource, ManualEpgSource, NavDirection, PlaylistEntry, TzMode } from '../types';
 import { $, $$, html, raw, type Safe } from '../utils/dom';
 import { morph } from '../utils/morph';
 import { SpatialNav } from '../navigation/spatial-nav';
-import { StorageService } from '../services/storage-service';
+import {
+  NUMBER_ENTRY_OSD_TIMEOUT_MS_OPTIONS,
+  LIVE_RECONNECT_ATTEMPT_OPTIONS,
+  PLAYER_OSD_TIMEOUT_MS_OPTIONS,
+  REFRESH_INTERVAL_HOUR_OPTIONS,
+  StorageService,
+  XTREAM_CATALOG_REFRESH_HOUR_OPTIONS,
+} from '../services/storage-service';
 import { EpgService } from '../services/epg-service';
 import { ChannelCustomizationService } from '../services/channel-customization';
 import { PlaylistService } from '../services/playlist-service';
@@ -30,9 +37,24 @@ import { showToast } from './toast';
 import { ConfirmationPrompt } from './confirmation-prompt';
 import qrcode from 'qrcode-generator';
 import { createLogger } from '../utils/logger';
-import { localeOptions, t, tp, type LocalePreference, type TextMessageKey } from '../i18n';
 import {
+  formatNumber,
+  localeOptions,
+  t,
+  tp,
+  type LocalePreference,
+  type TextMessageKey,
+} from '../i18n';
+import {
+  ANIMATION_MODES,
+  applyAnimationMode,
+  type AnimationMode,
+} from '../services/motion-service';
+import {
+  ADVANCED_ICON,
   APPEARANCE_ICON,
+  CHEVRON_DOWN,
+  CHEVRON_UP,
   CAPTIONS_ICON,
   DATABASE_ICON,
   GLOBE_ICON,
@@ -44,6 +66,8 @@ import {
 } from './icons';
 
 const log = createLogger('Settings');
+
+type EpgScopePlaylist = Pick<PlaylistEntry, 'id' | 'name' | 'url'>;
 
 /** Generate a PNG data URL containing a QR code for the given text. */
 function qrDataUrl(text: string): string {
@@ -170,8 +194,49 @@ function languageHeading(): string {
   return localized === 'Language' ? localized : `${localized} / Language`;
 }
 
+function refreshIntervalOptions(): { value: string; label: string }[] {
+  return REFRESH_INTERVAL_HOUR_OPTIONS.map(hours => ({
+    value: String(hours),
+    label: hours === 0
+      ? t('common.off')
+      : tp('settings.refreshHours', hours),
+  }));
+}
+
+function xtreamCatalogRefreshIntervalOptions(): { value: string; label: string }[] {
+  return XTREAM_CATALOG_REFRESH_HOUR_OPTIONS.map(hours => ({
+    value: String(hours),
+    label: tp('settings.refreshHours', hours),
+  }));
+}
+
+const ANIMATION_MODE_LABELS: Record<AnimationMode, TextMessageKey> = {
+  essential: 'settings.animationEssential',
+  reduced: 'settings.animationReduced',
+  full: 'settings.animationFull',
+};
+
+function animationModeOptions(): { value: AnimationMode; label: string }[] {
+  return ANIMATION_MODES.map(value => ({
+    value,
+    label: t(ANIMATION_MODE_LABELS[value]),
+  }));
+}
+
+function timeoutOptions(values: readonly number[]): { value: string; label: string }[] {
+  return values.map(value => {
+    const seconds = value / 1000;
+    return {
+      value: String(value),
+      label: tp('settings.durationSeconds', seconds, {
+        seconds: formatNumber(seconds, { maximumFractionDigits: 1 }),
+      }),
+    };
+  });
+}
+
 type SettingsCategory = 'general' | 'sources' | 'guide' | 'appearance'
-  | 'playback' | 'subtitles' | 'data';
+  | 'playback' | 'subtitles' | 'data' | 'advanced';
 
 const SETTINGS_CATEGORIES: readonly {
   id: SettingsCategory;
@@ -207,6 +272,11 @@ const SETTINGS_CATEGORIES: readonly {
     id: 'subtitles',
     label: 'settings.onlineSubtitles',
     icon: raw(CAPTIONS_ICON),
+  },
+  {
+    id: 'advanced',
+    label: 'settings.advanced',
+    icon: raw(ADVANCED_ICON),
   },
   {
     id: 'data',
@@ -339,6 +409,59 @@ function xtreamCard(pl: Partial<PlaylistEntry>) {
     </div>`;
 }
 
+function manualEpgSourceRow(
+  source: ManualEpgSource,
+  playlists: EpgScopePlaylist[],
+  index: number,
+  sourceCount: number,
+): Safe {
+  const canMoveEarlier = index > 0;
+  const canMoveLater = index < sourceCount - 1;
+  return html`
+    <div class="manual-epg-source" data-manual-epg-source data-key="manual-epg-${index}">
+      <div class="manual-epg-source-head">
+        <span class="manual-epg-priority">${index + 1}</span>
+        <input type="text" class="settings-input manual-epg-url" data-focusable
+               aria-label="${t('settings.xmltvUrl')}" value="${source.url}"
+               placeholder="http://host/guide.xml">
+        <button class="btn btn-secondary move-epg-earlier"
+                ${raw(canMoveEarlier ? 'data-focusable' : 'disabled')}
+                aria-label="${t('settings.moveEarlier')}">${raw(CHEVRON_UP)}</button>
+        <button class="btn btn-secondary move-epg-later"
+                ${raw(canMoveLater ? 'data-focusable' : 'disabled')}
+                aria-label="${t('settings.moveLater')}">${raw(CHEVRON_DOWN)}</button>
+        <button class="btn btn-danger remove-epg-source" data-focusable>
+          ${t('common.remove')}
+        </button>
+      </div>
+      <div class="manual-epg-scope">
+        <span class="manual-epg-scope-label">${t('settings.epgAppliesTo')}</span>
+        ${manualEpgScopeOptions(source, playlists)}
+      </div>
+    </div>`;
+}
+
+function manualEpgScopeOptions(
+  source: ManualEpgSource,
+  playlists: EpgScopePlaylist[],
+): Safe {
+  const allPlaylists = source.playlistIds.length === 0;
+  return html`
+    <div class="manual-epg-scope-options">
+      <button class="epg-scope-option ${allPlaylists ? 'active' : ''}"
+              data-focusable data-scope-all>
+        ${t('settings.allPlaylists')}
+      </button>
+      ${playlists.map(playlist => html`
+        <button class="epg-scope-option ${
+          source.playlistIds.includes(playlist.id) ? 'active' : ''
+        }" data-focusable data-playlist-id="${playlist.id}">
+          ${playlist.name || playlist.url}
+        </button>
+      `)}
+    </div>`;
+}
+
 /** "expires 2026-08-01" (UTC) or "never expires" for a unix-seconds expiry. */
 function formatExpiry(expiresAt: number | null): string {
   if (expiresAt === null) return t('settings.neverExpires');
@@ -368,6 +491,7 @@ export class Settings {
   private ignoreCategoryScroll = false;
   private categoryScrollFrame: number | null = null;
   private categorySyncFrame: number | null = null;
+  private categoryFocusFrame: number | null = null;
   private onManageReminders: () => void;
   private healthController: AbortController | null = null;
   private healthCheckPromise: Promise<void> | null = null;
@@ -419,7 +543,16 @@ export class Settings {
 
     this.container.addEventListener('input', (e: Event) => {
       const input = e.target as HTMLInputElement;
-      if (input.id === 'epg-url') this.refreshEpgOffsetEditor(input.value.trim());
+      if (input.classList.contains('manual-epg-url')) {
+        this.refreshEpgOffsetEditor(this.manualEpgSourcesFromEditor(), input.value.trim());
+      } else if (
+        input.classList.contains('playlist-name')
+        || input.classList.contains('playlist-url')
+        || input.classList.contains('xtream-name')
+        || input.classList.contains('xtream-url')
+      ) {
+        this.refreshManualEpgScopes();
+      }
     });
 
     // Pointer theme preview: hovering a swatch previews that theme app-wide;
@@ -455,11 +588,12 @@ export class Settings {
     this.watchlistAccount = enabledAccounts.find((account) => account.id === selectedAccountId)
       ?? enabledAccounts[0] ?? null;
     const uploads = allPlaylists.filter(pl => pl.source === 'upload');
-    const epgUrl = StorageService.getEpgUrl();
+    const manualEpgSources = StorageService.getManualEpgSources();
     this.storedEpgOffsets = StorageService.getEpgOffsets();
     this.epgOffsets = { ...this.storedEpgOffsets };
-    const epgSources = this.epgSources(epgUrl, allPlaylists);
+    const epgSources = this.epgSources(manualEpgSources, allPlaylists);
     const autoPlay = StorageService.getAutoPlay();
+    const livePreview = StorageService.getLivePreview();
     const channelCycleMode = StorageService.getChannelCycleMode();
     const showHidden = StorageService.getShowHiddenChannels();
     const feedTime = StorageService.getTzMode() === 'feed';
@@ -470,6 +604,13 @@ export class Settings {
     const overlayStyle = StorageService.getOverlayStyle();
     const textSize = StorageService.getTextSize();
     const localePreference = StorageService.getLocalePreference();
+    const liveReconnectAttempts = StorageService.getLiveReconnectAttempts();
+    const numberEntryOsdTimeoutMs = StorageService.getNumberEntryOsdTimeoutMs();
+    const playerOsdTimeoutMs = StorageService.getPlayerOsdTimeoutMs();
+    const animationMode = StorageService.getAnimationMode();
+    const playlistRefreshHours = StorageService.getPlaylistRefreshIntervalHours();
+    const epgRefreshHours = StorageService.getEpgRefreshIntervalHours();
+    const xtreamCatalogRefreshHours = StorageService.getXtreamCatalogRefreshIntervalHours();
     const overlayStyles = OVERLAY_STYLES.map(option => ({
       value: option.value,
       label: t(option.value === 'dark' ? 'settings.overlayDark' : 'settings.overlayFrosted'),
@@ -602,10 +743,22 @@ export class Settings {
               <div class="settings-section">
                 <h3 class="settings-section-title">${t('settings.epg')}</h3>
                 <div class="settings-item">
-                  <div class="settings-item-title">${t('settings.xmltvUrl')}</div>
-                  <input type="text" class="settings-input" data-focusable id="epg-url"
-                         value="${epgUrl}" placeholder="https://example.com/epg.xml">
-                  <div class="settings-item-hint">${t('settings.xmltvUrlHint')}</div>
+                  <div class="settings-item-title">${t('settings.manualEpgSources')}</div>
+                  <div class="manual-epg-sources">
+                    ${manualEpgSources.length
+                      ? manualEpgSources.map((source, index) =>
+                        manualEpgSourceRow(
+                          source,
+                          allPlaylists,
+                          index,
+                          manualEpgSources.length,
+                        ))
+                      : html`<div class="empty-hint">${t('settings.noEpgSources')}</div>`}
+                  </div>
+                  <button class="btn btn-primary" data-focusable id="add-epg-source">
+                    <span class="btn-add-icon" aria-hidden="true">+</span>${t('settings.addEpgSource')}
+                  </button>
+                  <div class="settings-item-hint">${t('settings.xmltvUrlsHint')}</div>
                 </div>
                 <div class="settings-item">
                   <div class="settings-item-title">${t('settings.timeZone')}</div>
@@ -663,6 +816,11 @@ export class Settings {
                   ${toggleGroup('auto-play', [{ value: 'on', label: t('settings.on') }, { value: 'off', label: t('settings.off') }], autoPlay ? 'on' : 'off')}
                 </div>
                 <div class="settings-item">
+                  <div class="settings-item-title">${t('settings.livePreview')}</div>
+                  ${toggleGroup('live-preview-setting', [{ value: 'on', label: t('settings.on') }, { value: 'off', label: t('settings.off') }], livePreview ? 'on' : 'off')}
+                  <div class="settings-item-hint">${t('settings.livePreviewHint')}</div>
+                </div>
+                <div class="settings-item">
                   <div class="settings-item-title">${t('settings.channelCycleMode')}</div>
                   ${toggleGroup('channel-cycle-mode', [
                     { value: 'global', label: t('settings.channelCycleGlobal') },
@@ -711,6 +869,131 @@ export class Settings {
                     <input type="password" class="settings-input" data-focusable id="os-pass"
                            value="${os.opensubtitles.password}" placeholder="password">
                   </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-category" id="settings-advanced"
+                 data-settings-category="advanced">
+              <div class="settings-section">
+                <h3 class="settings-section-title">${t('settings.advanced')}</h3>
+                <div class="settings-advanced-matrix">
+                  <div class="settings-advanced-row">
+                    <div class="settings-advanced-group">
+                      ${t('settings.advancedGroupInterface')}
+                    </div>
+                    <div class="settings-advanced-description">
+                      <div class="settings-item-title">${t('settings.animationMode')}</div>
+                      <div class="settings-item-hint">${t('settings.animationHint')}</div>
+                    </div>
+                    <div class="settings-advanced-control">
+                    ${toggleGroup(
+                      'animation-mode',
+                      animationModeOptions(),
+                      animationMode,
+                    )}
+                    </div>
+                  </div>
+                  <div class="settings-advanced-row">
+                    <div class="settings-advanced-group">
+                      ${t('settings.advancedGroupPlayback')}
+                    </div>
+                    <div class="settings-advanced-description">
+                      <div class="settings-item-title">${t('settings.liveReconnectAttempts')}</div>
+                      <div class="settings-item-hint">${t('settings.liveReconnectHint')}</div>
+                    </div>
+                    <div class="settings-advanced-control">
+                    ${dropdown(
+                      'live-reconnect-attempts',
+                      LIVE_RECONNECT_ATTEMPT_OPTIONS.map(value => ({
+                        value: String(value), label: String(value),
+                      })),
+                      String(liveReconnectAttempts),
+                    )}
+                    </div>
+                  </div>
+                  <div class="settings-advanced-row">
+                    <div class="settings-advanced-group">
+                      ${t('settings.advancedGroupOnScreenDisplay')}
+                    </div>
+                    <div class="settings-advanced-description">
+                      <div class="settings-item-title">${t('settings.numberEntryOsdTimeout')}</div>
+                      <div class="settings-item-hint">${t('settings.numberEntryOsdTimeoutHint')}</div>
+                    </div>
+                    <div class="settings-advanced-control">
+                    ${dropdown(
+                      'number-entry-osd-timeout',
+                      timeoutOptions(NUMBER_ENTRY_OSD_TIMEOUT_MS_OPTIONS),
+                      String(numberEntryOsdTimeoutMs),
+                    )}
+                    </div>
+                  </div>
+                  <div class="settings-advanced-row">
+                    <div class="settings-advanced-group" aria-hidden="true"></div>
+                    <div class="settings-advanced-description">
+                      <div class="settings-item-title">${t('settings.playerOsdTimeout')}</div>
+                      <div class="settings-item-hint">${t('settings.playerOsdTimeoutHint')}</div>
+                    </div>
+                    <div class="settings-advanced-control">
+                    ${dropdown(
+                      'player-osd-timeout',
+                      timeoutOptions(PLAYER_OSD_TIMEOUT_MS_OPTIONS),
+                      String(playerOsdTimeoutMs),
+                    )}
+                    </div>
+                  </div>
+                  <div class="settings-advanced-row">
+                    <div class="settings-advanced-group">
+                      ${t('settings.advancedGroupBackgroundRefresh')}
+                    </div>
+                    <div class="settings-advanced-description">
+                      <div class="settings-item-title">${t('settings.playlistRefreshInterval')}</div>
+                      <div class="settings-item-hint">${t('settings.playlistRefreshHint', {
+                        action: t('settings.refreshAll'),
+                      })}</div>
+                    </div>
+                    <div class="settings-advanced-control">
+                    ${dropdown(
+                      'playlist-refresh-interval',
+                      refreshIntervalOptions(),
+                      String(playlistRefreshHours),
+                    )}
+                    </div>
+                  </div>
+                  <div class="settings-advanced-row">
+                    <div class="settings-advanced-group" aria-hidden="true"></div>
+                    <div class="settings-advanced-description">
+                      <div class="settings-item-title">${t('settings.epgRefreshInterval')}</div>
+                      <div class="settings-item-hint">${t('settings.epgRefreshHint', {
+                        action: t('settings.refreshAll'),
+                      })}</div>
+                    </div>
+                    <div class="settings-advanced-control">
+                    ${dropdown(
+                      'epg-refresh-interval',
+                      refreshIntervalOptions(),
+                      String(epgRefreshHours),
+                    )}
+                    </div>
+                  </div>
+                  ${enabledAccounts.length ? html`
+                    <div class="settings-advanced-row">
+                      <div class="settings-advanced-group" aria-hidden="true"></div>
+                      <div class="settings-advanced-description">
+                        <div class="settings-item-title">${t('settings.xtreamCatalogRefreshInterval')}</div>
+                        <div class="settings-item-hint">${t('settings.xtreamCatalogRefreshHint', {
+                          action: t('settings.refreshAll'),
+                        })}</div>
+                      </div>
+                      <div class="settings-advanced-control">
+                      ${dropdown(
+                        'xtream-catalog-refresh-interval',
+                        xtreamCatalogRefreshIntervalOptions(),
+                        String(xtreamCatalogRefreshHours),
+                      )}
+                      </div>
+                    </div>
+                  ` : ''}
                 </div>
               </div>
             </div>
@@ -774,7 +1057,7 @@ export class Settings {
     void this.loadCacheUsage();
   }
 
-  private epgSources(manualUrl: string, playlists: PlaylistEntry[]): EpgSource[] {
+  private epgSources(manualSources: ManualEpgSource[], playlists: PlaylistEntry[]): EpgSource[] {
     const enabledIds = new Set(playlists.filter(isSourceEnabled).map(source => source.id));
     const discovered = PlaylistService.epgSources
       .map(source => ({
@@ -782,9 +1065,21 @@ export class Settings {
         playlistIds: source.playlistIds.filter(id => enabledIds.has(id)),
       }))
       .filter(source => source.playlistIds.length > 0);
-    return manualUrl && !discovered.some(source => source.url === manualUrl)
-      ? [{ url: manualUrl, playlistIds: [], kind: 'manual' }, ...discovered]
-      : discovered;
+    const sources: EpgSource[] = manualSources.map(source => ({
+      ...source,
+      kind: 'manual',
+    }));
+    for (const source of discovered) {
+      const existing = sources.find(candidate => candidate.url === source.url);
+      if (!existing) {
+        sources.push(source);
+      } else if (existing.playlistIds.length) {
+        for (const id of source.playlistIds) {
+          if (!existing.playlistIds.includes(id)) existing.playlistIds.push(id);
+        }
+      }
+    }
+    return sources;
   }
 
   private epgSourceOptions(
@@ -866,12 +1161,15 @@ export class Settings {
       </div>`;
   }
 
-  private refreshEpgOffsetEditor(manualUrl: string): void {
+  private refreshEpgOffsetEditor(
+    manualSources: ManualEpgSource[],
+    selectedUrl?: string,
+  ): void {
     const editor = $('.epg-offset-editor', this.container);
     if (!editor) return;
     const playlists = StorageService.getPlaylists();
-    const sources = this.epgSources(manualUrl, playlists);
-    morph(editor, this.epgOffsetEditor(sources, playlists, manualUrl));
+    const sources = this.epgSources(manualSources, playlists);
+    morph(editor, this.epgOffsetEditor(sources, playlists, selectedUrl));
   }
 
   private adjustEpgOffset(delta: number): void {
@@ -983,6 +1281,16 @@ export class Settings {
       this.addPlaylistEntry();
     } else if (el.classList.contains('remove-playlist')) {
       this.removePlaylistEntry(el);
+    } else if (el.id === 'add-epg-source') {
+      this.addManualEpgSource();
+    } else if (el.classList.contains('remove-epg-source')) {
+      this.removeManualEpgSource(el);
+    } else if (el.classList.contains('move-epg-earlier')) {
+      this.moveManualEpgSource(el, -1);
+    } else if (el.classList.contains('move-epg-later')) {
+      this.moveManualEpgSource(el, 1);
+    } else if (el.classList.contains('epg-scope-option')) {
+      this.toggleManualEpgScope(el);
     } else if (el.id === 'add-xtream') {
       this.addXtreamEntry();
     } else if (el.classList.contains('remove-xtream')) {
@@ -1327,6 +1635,9 @@ export class Settings {
   // Live theme preview: focusing (D-pad) or hovering (pointer) a swatch previews
   // that theme app-wide; anything else falls back to the currently selected theme.
   private onNavFocus(el: HTMLElement | null): void {
+    this.container.querySelector('.settings-advanced-row.focused')
+      ?.classList.remove('focused');
+    el?.closest('.settings-advanced-row')?.classList.add('focused');
     if (el?.dataset.themeId) previewTheme(el.dataset.themeId);
     else previewTheme(this.selectedTheme);
   }
@@ -1358,7 +1669,11 @@ export class Settings {
         maxScrollTop,
       ),
     );
-    target.scrollIntoView({ block: 'start', inline: 'nearest', behavior: 'smooth' });
+    target.scrollIntoView({
+      block: 'start',
+      inline: 'nearest',
+      behavior: 'auto',
+    });
     this.watchCategoryScroll(main, category, targetScrollTop);
   }
 
@@ -1430,10 +1745,22 @@ export class Settings {
   private focusCategoryFirst(category: SettingsCategory): void {
     const pane = this.container.querySelector<HTMLElement>(`#settings-${category}`);
     if (!pane) return;
+    if (this.categorySyncFrame !== null) {
+      window.cancelAnimationFrame(this.categorySyncFrame);
+      this.categorySyncFrame = null;
+    }
+    if (this.categoryFocusFrame !== null) {
+      window.cancelAnimationFrame(this.categoryFocusFrame);
+    }
+    this.ignoreCategoryScroll = true;
     this.nav.setRestrict(pane);
     const focused = this.nav.focusFirst();
     this.nav.setRestrict(null);
     if (focused) this.setActiveCategory(category);
+    this.categoryFocusFrame = window.requestAnimationFrame(() => {
+      this.categoryFocusFrame = null;
+      if (this.categoryScrollFrame === null) this.ignoreCategoryScroll = false;
+    });
   }
 
   private syncCategoryFromScroll(main: HTMLElement): void {
@@ -1556,12 +1883,208 @@ export class Settings {
       <button class="btn btn-danger remove-playlist" data-focusable>${t('common.remove')}</button>
     `;
     entries.appendChild(row);
+    this.refreshManualEpgScopes();
 
     const newInput = row.querySelector<HTMLElement>('input');
     if (newInput) {
       this.nav.focus(newInput);
       (newInput as HTMLInputElement).focus();
     }
+  }
+
+  private manualEpgSourcesFromEditor(
+    allowedPlaylistIds?: ReadonlySet<string>,
+  ): ManualEpgSource[] {
+    return Array.from(
+      this.container.querySelectorAll<HTMLElement>('[data-manual-epg-source]'),
+    ).map(row => {
+      const source = this.manualEpgSourceFromRow(row);
+      return {
+        url: source.url.trim(),
+        playlistIds: allowedPlaylistIds && source.playlistIds.length
+          ? source.playlistIds.filter(id => allowedPlaylistIds.has(id))
+          : source.playlistIds,
+      };
+    })
+      .filter(source => source.url !== '');
+  }
+
+  private manualEpgSourceFromRow(row: HTMLElement): ManualEpgSource {
+    const url = row.querySelector<HTMLInputElement>('.manual-epg-url')?.value ?? '';
+    const all = row.querySelector('.epg-scope-option[data-scope-all].active');
+    const playlistIds = all
+      ? []
+      : Array.from(row.querySelectorAll<HTMLElement>(
+          '.epg-scope-option[data-playlist-id].active',
+        )).map(option => option.dataset.playlistId ?? '').filter(Boolean);
+    return { url, playlistIds };
+  }
+
+  private applyManualEpgSourceToRow(
+    row: HTMLElement,
+    source: ManualEpgSource,
+  ): void {
+    const input = row.querySelector<HTMLInputElement>('.manual-epg-url');
+    if (input) input.value = source.url;
+    row.querySelector<HTMLElement>('[data-scope-all]')?.classList.toggle(
+      'active',
+      source.playlistIds.length === 0,
+    );
+    row.querySelectorAll<HTMLElement>('[data-playlist-id]').forEach(option => {
+      option.classList.toggle(
+        'active',
+        source.playlistIds.includes(option.dataset.playlistId ?? ''),
+      );
+    });
+  }
+
+  private currentEpgOffsetSource(): string | undefined {
+    return $('#epg-offset-source', this.container)?.dataset.value;
+  }
+
+  private epgScopePlaylistsFromEditor(): EpgScopePlaylist[] {
+    const playlists = $$('#playlist-entries [data-source-entry]', this.container)
+      .map(row => ({
+        id: row.dataset.id ?? '',
+        name: row.querySelector<HTMLInputElement>('.playlist-name')?.value.trim() ?? '',
+        url: row.querySelector<HTMLInputElement>('.playlist-url')?.value.trim() ?? '',
+      }))
+      .filter(playlist => playlist.id !== '');
+    const accounts = $$('#xtream-entries .xtream-card', this.container)
+      .map(card => ({
+        id: card.dataset.id ?? '',
+        name: card.querySelector<HTMLInputElement>('.xtream-name')?.value.trim() ?? '',
+        url: card.querySelector<HTMLInputElement>('.xtream-url')?.value.trim() ?? '',
+      }))
+      .filter(account => account.id !== '');
+    const uploads = StorageService.getPlaylists()
+      .filter(playlist => playlist.source === 'upload')
+      .map(playlist => ({
+        id: playlist.id,
+        name: playlist.name,
+        url: playlist.url,
+      }));
+    return [...playlists, ...accounts, ...uploads];
+  }
+
+  private refreshManualEpgScopes(): void {
+    const playlists = this.epgScopePlaylistsFromEditor();
+    const playlistIds = new Set(playlists.map(playlist => playlist.id));
+    this.container.querySelectorAll<HTMLElement>('[data-manual-epg-source]')
+      .forEach(row => {
+        const source = this.manualEpgSourceFromRow(row);
+        if (source.playlistIds.length) {
+          source.playlistIds = source.playlistIds.filter(id => playlistIds.has(id));
+        }
+        const options = row.querySelector<HTMLElement>('.manual-epg-scope-options');
+        if (options) morph(options, manualEpgScopeOptions(source, playlists));
+      });
+  }
+
+  private addManualEpgSource(): void {
+    const entries = $('.manual-epg-sources', this.container);
+    if (!entries) return;
+    entries.querySelector('.empty-hint')?.remove();
+    const playlists = this.epgScopePlaylistsFromEditor();
+    const index = entries.querySelectorAll('[data-manual-epg-source]').length;
+    const wrap = document.createElement('div');
+    wrap.innerHTML = String(manualEpgSourceRow(
+      { url: '', playlistIds: [] },
+      playlists,
+      index,
+      index + 1,
+    ));
+    const row = wrap.firstElementChild;
+    if (!row) return;
+    entries.appendChild(row);
+    this.renumberManualEpgSources();
+    const input = row.querySelector<HTMLInputElement>('.manual-epg-url');
+    if (input) {
+      this.nav.focus(input);
+      input.focus();
+    }
+  }
+
+  private removeManualEpgSource(button: HTMLElement): void {
+    const entries = $('.manual-epg-sources', this.container);
+    button.closest('[data-manual-epg-source]')?.remove();
+    if (entries && !entries.querySelector('[data-manual-epg-source]')) {
+      const emptyHint = document.createElement('div');
+      emptyHint.className = 'empty-hint';
+      emptyHint.textContent = t('settings.noEpgSources');
+      entries.appendChild(emptyHint);
+    }
+    this.renumberManualEpgSources();
+    this.refreshEpgOffsetEditor(
+      this.manualEpgSourcesFromEditor(),
+      this.currentEpgOffsetSource(),
+    );
+    this.nav.focus($('#add-epg-source', this.container));
+  }
+
+  private moveManualEpgSource(button: HTMLElement, direction: -1 | 1): void {
+    const row = button.closest<HTMLElement>('[data-manual-epg-source]');
+    if (!row) return;
+    const target = direction < 0
+      ? row.previousElementSibling
+      : row.nextElementSibling;
+    if (!(target instanceof HTMLElement)) return;
+    const source = this.manualEpgSourceFromRow(row);
+    const targetSource = this.manualEpgSourceFromRow(target);
+    this.applyManualEpgSourceToRow(target, source);
+    this.applyManualEpgSourceToRow(row, targetSource);
+    this.refreshEpgOffsetEditor(
+      this.manualEpgSourcesFromEditor(),
+      this.currentEpgOffsetSource(),
+    );
+    this.nav.focus(target.querySelector<HTMLElement>('.manual-epg-url'));
+  }
+
+  private renumberManualEpgSources(): void {
+    const rows = Array.from(
+      this.container.querySelectorAll<HTMLElement>('[data-manual-epg-source]'),
+    );
+    rows.forEach((row, index) => {
+        const priority = row.querySelector('.manual-epg-priority');
+        if (priority) priority.textContent = String(index + 1);
+        const earlier = row.querySelector<HTMLButtonElement>('.move-epg-earlier');
+        const later = row.querySelector<HTMLButtonElement>('.move-epg-later');
+        this.setManualEpgMoveState(earlier, index > 0);
+        this.setManualEpgMoveState(later, index < rows.length - 1);
+      });
+  }
+
+  private setManualEpgMoveState(
+    button: HTMLButtonElement | null,
+    enabled: boolean,
+  ): void {
+    if (!button) return;
+    button.disabled = !enabled;
+    if (enabled) button.setAttribute('data-focusable', '');
+    else button.removeAttribute('data-focusable');
+  }
+
+  private toggleManualEpgScope(option: HTMLElement): void {
+    const row = option.closest<HTMLElement>('[data-manual-epg-source]');
+    if (!row) return;
+    const all = row.querySelector<HTMLElement>('[data-scope-all]');
+    const scoped = Array.from(
+      row.querySelectorAll<HTMLElement>('[data-playlist-id]'),
+    );
+    if (option.hasAttribute('data-scope-all')) {
+      all?.classList.add('active');
+      scoped.forEach(item => item.classList.remove('active'));
+    } else {
+      option.classList.toggle('active');
+      all?.classList.remove('active');
+      if (!scoped.some(item => item.classList.contains('active'))) {
+        all?.classList.add('active');
+      }
+    }
+    this.refreshEpgOffsetEditor(
+      this.manualEpgSourcesFromEditor(),
+      this.currentEpgOffsetSource(),
+    );
   }
 
   private removePlaylistEntry(removeBtn: HTMLElement): void {
@@ -1579,6 +2102,7 @@ export class Settings {
       e.textContent = t('settings.noPlaylists');
       entries.appendChild(e);
     }
+    this.refreshManualEpgScopes();
     this.nav.focusFirst();
   }
 
@@ -1594,6 +2118,7 @@ export class Settings {
     const card = tmp.firstElementChild as HTMLElement | null;
     if (!card) return;
     entries.appendChild(card);
+    this.refreshManualEpgScopes();
 
     const firstInput = card.querySelector<HTMLInputElement>('input');
     if (firstInput) {
@@ -1613,6 +2138,7 @@ export class Settings {
       e.textContent = t('settings.noXtream');
       entries.appendChild(e);
     }
+    this.refreshManualEpgScopes();
     this.nav.focusFirst();
   }
 
@@ -1745,16 +2271,38 @@ export class Settings {
       return withEnabledState(playlist, toggle?.dataset.enabled !== 'false');
     });
     const nextSources = [...nonUpload, ...uploads];
+    const manualEpgSources = this.manualEpgSourcesFromEditor(
+      new Set(nextSources.map(source => source.id)),
+    );
+    const seenEpgUrls = new Set<string>();
+    const duplicateEpgUrl = manualEpgSources.find(source => {
+      if (seenEpgUrls.has(source.url)) return true;
+      seenEpgUrls.add(source.url);
+      return false;
+    })?.url;
+    if (duplicateEpgUrl) {
+      const duplicateInput = Array.from(
+        this.container.querySelectorAll<HTMLInputElement>('.manual-epg-url'),
+      ).filter(input => input.value.trim() === duplicateEpgUrl)[1];
+      if (duplicateInput) {
+        this.nav.focus(duplicateInput);
+        duplicateInput.focus();
+      }
+      showToast(t('settings.duplicateEpgSource'));
+      return;
+    }
+
     ReminderService.backfillSourceIds();
     StorageService.setPlaylists(nextSources);
 
-    const epgInput = $('#epg-url', this.container) as HTMLInputElement | null;
-    const prevEpg = StorageService.getEpgUrl();
-    const epgUrl = epgInput ? epgInput.value.trim() : prevEpg;
-    if (epgInput) StorageService.setEpgUrl(epgUrl);
+    const previousManualEpgSources = StorageService.getManualEpgSources();
+    StorageService.setManualEpgSources(manualEpgSources);
 
     const autoPlayBtn = $('#auto-play .toggle-option.active', this.container);
     if (autoPlayBtn) StorageService.setAutoPlay(autoPlayBtn.dataset.value === 'on');
+
+    const livePreviewBtn = $('#live-preview-setting .toggle-option.active', this.container);
+    if (livePreviewBtn) StorageService.setLivePreview(livePreviewBtn.dataset.value === 'on');
 
     const channelCycleBtn = $('#channel-cycle-mode .toggle-option.active', this.container);
     if (channelCycleBtn?.dataset.value) {
@@ -1793,9 +2341,11 @@ export class Settings {
       sourceByChannel,
     );
     const nextEpgOffsets = { ...this.epgOffsets };
-    if (prevEpg && prevEpg !== epgUrl
-        && !PlaylistService.epgSources.some(source => source.url === prevEpg)) {
-      delete nextEpgOffsets[prevEpg];
+    for (const source of previousManualEpgSources) {
+      if (!manualEpgSources.some(candidate => candidate.url === source.url)
+          && !PlaylistService.epgSources.some(candidate => candidate.url === source.url)) {
+        delete nextEpgOffsets[source.url];
+      }
     }
     this.epgOffsets = nextEpgOffsets;
     StorageService.setEpgOffsets(nextEpgOffsets);
@@ -1810,6 +2360,48 @@ export class Settings {
 
     const locale = ($('#app-language', this.container) as HTMLElement | null)?.dataset.value as LocalePreference | undefined;
     if (locale) StorageService.setLocalePreference(locale);
+
+    const liveReconnectAttempts = Number(
+      ($('#live-reconnect-attempts', this.container) as HTMLElement | null)?.dataset.value,
+    );
+    StorageService.setLiveReconnectAttempts(liveReconnectAttempts);
+
+    const numberEntryOsdTimeoutMs = Number(
+      ($('#number-entry-osd-timeout', this.container) as HTMLElement | null)?.dataset.value,
+    );
+    StorageService.setNumberEntryOsdTimeoutMs(numberEntryOsdTimeoutMs);
+
+    const playerOsdTimeoutMs = Number(
+      ($('#player-osd-timeout', this.container) as HTMLElement | null)?.dataset.value,
+    );
+    StorageService.setPlayerOsdTimeoutMs(playerOsdTimeoutMs);
+
+    const animationMode = $('#animation-mode .toggle-option.active', this.container)
+      ?.dataset.value as AnimationMode | undefined;
+    if (animationMode) {
+      StorageService.setAnimationMode(animationMode);
+      applyAnimationMode(animationMode);
+    }
+
+    const playlistRefreshHours = Number(
+      ($('#playlist-refresh-interval', this.container) as HTMLElement | null)?.dataset.value,
+    );
+    StorageService.setPlaylistRefreshIntervalHours(playlistRefreshHours);
+
+    const epgRefreshHours = Number(
+      ($('#epg-refresh-interval', this.container) as HTMLElement | null)?.dataset.value,
+    );
+    StorageService.setEpgRefreshIntervalHours(epgRefreshHours);
+
+    const xtreamCatalogRefresh = $(
+      '#xtream-catalog-refresh-interval',
+      this.container,
+    ) as HTMLElement | null;
+    if (xtreamCatalogRefresh) {
+      StorageService.setXtreamCatalogRefreshIntervalHours(
+        Number(xtreamCatalogRefresh.dataset.value),
+      );
+    }
 
     const prevOs = StorageService.getOnlineSubtitleConfig();
     const osVal = (id: string) => ($(`#${id}`, this.container) as HTMLInputElement | null)?.value.trim() ?? '';
@@ -1841,7 +2433,8 @@ export class Settings {
       ]));
     const offsetSig = (offsets: Record<string, number>) =>
       JSON.stringify(Object.keys(offsets).sort().map(url => [url, offsets[url]]));
-    const dataChanged = epgUrl !== prevEpg
+    const dataChanged = JSON.stringify(manualEpgSources)
+        !== JSON.stringify(previousManualEpgSources)
       || sig(stored) !== sig(nextSources)
       || offsetSig(this.storedEpgOffsets) !== offsetSig(this.epgOffsets);
     this.onSave(dataChanged ? 'reload' : 'apply');
@@ -1918,5 +2511,6 @@ export class Settings {
       ? html`${uploads.map((pl) =>
           uploadRow(pl, pending.get(pl.id || pl.url) ?? isSourceEnabled(pl)))}`
       : html`<div class="empty-hint">${t('settings.noUploads')}</div>`);
+    this.refreshManualEpgScopes();
   }
 }

@@ -1,4 +1,5 @@
 import type { NavDirection } from '../types';
+import { CONFIG } from '../config';
 
 interface Candidate {
   el: HTMLElement;
@@ -13,6 +14,7 @@ export class SpatialNav {
   private visibilityCache = new WeakMap<HTMLElement, boolean>();
   private readonly visibilityObserver: MutationObserver;
   private readonly stylesheetObserver: MutationObserver;
+  private lastScrollFocusAt = 0;
   // Per-container memory for `data-nav-enter="last-focused"`: re-entering a
   // container returns to where focus left it instead of the nearest edge item.
   private lastFocusedIn = new Map<HTMLElement, HTMLElement>();
@@ -216,7 +218,19 @@ export class SpatialNav {
     this.focused = el;
     if (el) {
       el.classList.add('focused');
-      el.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+      const now = Date.now();
+      const elapsed = now - this.lastScrollFocusAt;
+      const repeated = this.lastScrollFocusAt !== 0
+        && elapsed >= 0
+        && elapsed <= CONFIG.NAVIGATION.FOCUS_REPEAT_WINDOW_MS;
+      this.lastScrollFocusAt = now;
+      el.scrollIntoView({
+        block: 'nearest',
+        inline: 'nearest',
+        behavior: repeated ? 'instant' : 'auto',
+      });
+    } else {
+      this.lastScrollFocusAt = 0;
     }
     this.onFocusChange?.(el);
   }
@@ -264,6 +278,22 @@ export class SpatialNav {
   focusBySelector(selector: string): void {
     const el = this.root().querySelector<HTMLElement>(selector);
     if (el) this.focus(el);
+  }
+
+  focusContainerEntry(selector: string): boolean {
+    const container = this.root().querySelector<HTMLElement>(selector);
+    if (!container) return false;
+    const elements = Array.from(
+      container.querySelectorAll<HTMLElement>('[data-focusable]'),
+    );
+    const candidates = this.getCandidates(elements, true, container);
+    if (!candidates.length) return false;
+    const remembered = this.lastFocusedIn.get(container);
+    const target = remembered && candidates.some(candidate => candidate.el === remembered)
+      ? remembered
+      : candidates[0].el;
+    this.focus(target);
+    return true;
   }
 
   move(direction: NavDirection): boolean {

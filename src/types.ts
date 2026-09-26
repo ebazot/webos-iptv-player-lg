@@ -55,6 +55,14 @@ export interface Channel {
   catchupTimeOffsetMinutes?: number;
 }
 
+export type LivePlaybackStatus = 'loading' | 'playing' | 'buffering' | 'paused' | 'error';
+
+export interface LivePlaybackSnapshot {
+  channel: Channel;
+  muted: boolean;
+  status: LivePlaybackStatus;
+}
+
 export type ChannelHealthStatus = 'healthy' | 'suspect' | 'unavailable';
 
 export interface ChannelHealthRecord {
@@ -79,6 +87,12 @@ export interface EpgSource {
   kind: 'manual' | 'm3u' | 'xtream';
   /** User correction applied after parsing; cached source timestamps stay unchanged. */
   offsetMinutes?: number;
+}
+
+export interface ManualEpgSource {
+  url: string;
+  /** Empty means the source applies to every playlist. */
+  playlistIds: string[];
 }
 
 export interface ParsedPlaylist {
@@ -442,6 +456,17 @@ export interface Episode {
 }
 
 export interface SeriesInfo {
+  plot: string;
+  cast: string;
+  director: string;
+  genre: string;
+  releaseDate: string;
+  episodeRunTimeMins: number;
+  poster: string;
+  rating: string;
+  imdbId: string;
+  tmdbId: string;
+  year: number;
   seasons: number[];
   episodesBySeason: Record<number, Episode[]>;
 }

@@ -34,13 +34,15 @@
   .tab-bar-inner > .tab-bar-account { margin-left: 52px; }
   .epg-prog-title > .epg-bell-glyph { margin-left: 18px; }
   .settings-field > .settings-item-hint { margin-top: 14px; }
+  .live-preview-favorite { margin-right: 20px; }
 }
 
 @supports not (backdrop-filter: blur(1px)) {
   .player-sidebar { background: rgb(20, 20, 35); }
   .player-menu,
   .player-osd,
-  .number-entry { background: rgb(10, 10, 15); }
+  .number-entry,
+  .live-preview-message { background: rgb(10, 10, 15); }
 }
 
 /*

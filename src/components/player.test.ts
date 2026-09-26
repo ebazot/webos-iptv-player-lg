@@ -10,6 +10,7 @@ const { healthMock, playlistMock } = vi.hoisted(() => ({
     channels: [] as unknown[],
     getByIndex: vi.fn(),
     indexOf: vi.fn(),
+    resolveChannelKey: vi.fn(),
     getByGroup: vi.fn(),
   },
 }));
@@ -31,6 +32,8 @@ vi.mock('../services/storage-service', () => ({
     touchRecentlyWatchedLive: vi.fn(),
     getSubtitleOffset: vi.fn(() => 0), setSubtitleOffset: vi.fn(),
     getChannelCycleMode: vi.fn(() => 'global'),
+    getLiveReconnectAttempts: vi.fn(() => 3),
+    getPlayerOsdTimeoutMs: vi.fn(() => 5000),
     getPlaylists: vi.fn(() => [{
       id: 'x',
       name: 'Account',
@@ -224,6 +227,7 @@ beforeEach(() => {
   document.body.appendChild(container);
   playlistMock.getByIndex.mockReturnValue(CHANNEL);
   playlistMock.indexOf.mockReturnValue(0);
+  playlistMock.resolveChannelKey.mockReturnValue({ channel: CHANNEL, channelIndex: 0 });
   playlistMock.getByGroup.mockReturnValue([]);
   healthMock.recordPlaybackFailure.mockClear();
   healthMock.recordPlaybackSuccess.mockReset();
@@ -580,7 +584,7 @@ describe('Player live playback', () => {
     player = new Player(container, vi.fn(), onPlaybackChanged);
     player.init(video);
     player.play(0);
-    playlistMock.indexOf.mockReturnValue(-1);
+    playlistMock.resolveChannelKey.mockReturnValue(null);
 
     player.syncCurrentIndex();
 
@@ -620,13 +624,80 @@ describe('Player live playback', () => {
     expect(healthMock.recordPlaybackFailure).not.toHaveBeenCalled();
   });
 
-  it('coalesces repeated playback errors into one channel advance', async () => {
+  it('detects a stalled initial load even while autoplay has not unpaused the video', async () => {
+    Object.defineProperties(video, {
+      paused: { get: () => true, configurable: true },
+      readyState: { value: 0, configurable: true },
+      networkState: { value: 2, configurable: true },
+    });
+    player.play(0);
+    await flush();
+    const reload = vi.spyOn(player as unknown as { reloadCurrentStream(): void }, 'reloadCurrentStream')
+      .mockImplementation(() => {});
+    const watchdog = (player as unknown as { stallWatchdog: { start(): void } }).stallWatchdog;
+    watchdog.start();
+
+    vi.advanceTimersByTime(
+      CONFIG.PLAYER.STALL_POLL_MS * (CONFIG.PLAYER.STALL_FREEZE_TICKS + 1),
+    );
+    expect(reload).toHaveBeenCalledOnce();
+  });
+
+  it('does not retry a live stream the user pauses after playback starts', async () => {
+    Object.defineProperties(video, {
+      paused: { get: () => true, configurable: true },
+      readyState: { value: 0, configurable: true },
+      networkState: { value: 2, configurable: true },
+    });
+    player.play(0);
+    await flush();
+    video.dispatchEvent(new Event('playing'));
+    const reload = vi.spyOn(player as unknown as { reloadCurrentStream(): void }, 'reloadCurrentStream')
+      .mockImplementation(() => {});
+    const watchdog = (player as unknown as { stallWatchdog: { start(): void } }).stallWatchdog;
+    watchdog.start();
+
+    vi.advanceTimersByTime(
+      CONFIG.PLAYER.STALL_POLL_MS * CONFIG.PLAYER.STALL_FREEZE_TICKS * 2,
+    );
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it('coalesces errors and reconnects the same channel before advancing', async () => {
     playlistMock.channels = [{}, {}];
+    HTMLMediaElement.prototype.play = vi.fn().mockResolvedValue(undefined);
+    HTMLMediaElement.prototype.pause = vi.fn();
+    HTMLMediaElement.prototype.load = vi.fn();
+    video = document.createElement('video');
+    container.appendChild(video);
+    player.init(video);
     player.play(0);
     playlistMock.getByIndex.mockClear();
 
     for (let i = 0; i < 20; i++) video.dispatchEvent(new Event('error'));
     await flush();
+    expect(healthMock.recordPlaybackFailure).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1999);
+    expect(container.querySelector('video')).toBe(video);
+    vi.advanceTimersByTime(1);
+    expect(playlistMock.getByIndex).not.toHaveBeenCalled();
+
+    const first = container.querySelector('video')!;
+    first.dispatchEvent(new Event('error'));
+    first.dispatchEvent(new Event('error'));
+    vi.advanceTimersByTime(2000);
+    const second = container.querySelector('video')!;
+    expect(second).not.toBe(first);
+    first.dispatchEvent(new Event('error'));
+    vi.advanceTimersByTime(2000);
+    expect(container.querySelector('video')).toBe(second);
+    second.dispatchEvent(new Event('error'));
+    vi.advanceTimersByTime(2000);
+    const third = container.querySelector('video')!;
+    expect(third).not.toBe(second);
+    expect(healthMock.recordPlaybackFailure).not.toHaveBeenCalled();
+
+    third.dispatchEvent(new Event('error'));
     vi.advanceTimersByTime(2000);
 
     expect(playlistMock.getByIndex).toHaveBeenCalledTimes(1);
@@ -634,18 +705,64 @@ describe('Player live playback', () => {
     expect(healthMock.recordPlaybackFailure).toHaveBeenCalledOnce();
     expect(healthMock.recordPlaybackFailure)
       .toHaveBeenCalledWith(CHANNEL, 'playback_error');
+    await flush();
     expect(onHealthChanged).toHaveBeenCalledOnce();
+  });
+
+  it('cancels a pending reconnect if the original live stream resumes', async () => {
+    player.play(0);
+    await flush();
+    video.dispatchEvent(new Event('error'));
+    vi.advanceTimersByTime(1000);
+    video.dispatchEvent(new Event('playing'));
+    vi.advanceTimersByTime(3000);
+    expect(container.querySelector('video')).toBeNull();
+    expect(healthMock.recordPlaybackFailure).not.toHaveBeenCalled();
+    expect(container.querySelector('#player-osd')?.textContent).not.toContain('Reconnecting');
+  });
+
+  it('honors a disabled retry limit and skips reconnect for unsupported sources', async () => {
+    playlistMock.channels = [{}, {}];
+    vi.mocked(StorageService.getLiveReconnectAttempts).mockReturnValueOnce(0);
+    player.play(0);
+    await flush();
+    video.dispatchEvent(new Event('error'));
+    vi.advanceTimersByTime(2000);
+    expect(healthMock.recordPlaybackFailure).toHaveBeenCalledWith(CHANNEL, 'playback_error');
+    expect(container.querySelector('video')).toBeNull();
+
+    player.play(0);
+    Object.defineProperty(video, 'error', { configurable: true, value: { code: 4, message: '' } });
+    healthMock.recordPlaybackFailure.mockClear();
+    video.dispatchEvent(new Event('error'));
+    expect(healthMock.recordPlaybackFailure).toHaveBeenCalledOnce();
+  });
+
+  it('cancels a pending reconnect when the user changes channel or stops', async () => {
+    playlistMock.channels = [{}, {}];
+    player.play(0);
+    await flush();
+    video.dispatchEvent(new Event('error'));
+    player.play(1);
+    playlistMock.getByIndex.mockClear();
+    vi.advanceTimersByTime(3000);
+    expect(playlistMock.getByIndex).not.toHaveBeenCalled();
+
+    video.dispatchEvent(new Event('error'));
+    player.stop();
+    vi.advanceTimersByTime(3000);
+    expect(healthMock.recordPlaybackFailure).not.toHaveBeenCalled();
   });
 
   it('starts the OSD hide timer when startup playback begins', async () => {
     video.pause();
     player.showOSD();
-    vi.advanceTimersByTime(CONFIG.PLAYER.OSD_TIMEOUT);
+    vi.advanceTimersByTime(CONFIG.PLAYER.DEFAULT_PLAYER_OSD_TIMEOUT_MS);
     expect((container.querySelector('#player-osd') as HTMLElement).style.display).not.toBe('none');
 
     await video.play();
     video.dispatchEvent(new Event('playing'));
-    vi.advanceTimersByTime(CONFIG.PLAYER.OSD_TIMEOUT);
+    vi.advanceTimersByTime(CONFIG.PLAYER.DEFAULT_PLAYER_OSD_TIMEOUT_MS);
 
     expect((container.querySelector('#player-osd') as HTMLElement).style.display).toBe('none');
   });
@@ -794,10 +911,14 @@ describe('Player live DVR', () => {
     expect(live.paused).toBe(true);
   });
 
-  it('clamps to the window start when resuming after it rolled past the paused point', () => {
+  it('holds the paused point until resume, then clamps into the rolled window', () => {
     player.handleAction('rewind');
     player.handleAction('pause');
+    const pausedAt = live.currentTime;
     setWindow(20, 80); // window rolled forward while paused
+    live.dispatchEvent(new Event('progress'));
+    expect(live.currentTime).toBe(pausedAt);
+
     player.handleAction('play');
     expect(live.currentTime).toBe(20 + OLDEST_PAD);
   });
@@ -892,7 +1013,7 @@ describe('Player stall reconnect OSD', () => {
 
     // A real stall reloads only after the OSD has auto-hidden (osdVisible false)
     // — the case the message used to get stuck in.
-    vi.advanceTimersByTime(CONFIG.PLAYER.OSD_TIMEOUT + 100);
+    vi.advanceTimersByTime(CONFIG.PLAYER.DEFAULT_PLAYER_OSD_TIMEOUT_MS + 100);
 
     (player as unknown as { reloadCurrentStream(): void }).reloadCurrentStream();
     await flush();

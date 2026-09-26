@@ -1,11 +1,13 @@
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { SpatialNav } from './spatial-nav';
+import { applyAnimationMode } from '../services/motion-service';
 
 // jsdom implements no layout: scrollIntoView is missing and getBoundingClientRect
 // returns zeros. Stub both so focus()/move() can be exercised deterministically.
 beforeEach(() => {
   Element.prototype.scrollIntoView = vi.fn();
+  applyAnimationMode('reduced');
 });
 
 function focusable(rect: { x: number; y: number; w?: number; h?: number }, container?: string): HTMLElement {
@@ -40,6 +42,44 @@ describe('SpatialNav', () => {
       expect(a.classList.contains('focused')).toBe(false);
       expect(b.classList.contains('focused')).toBe(true);
       expect(nav.focused).toBe(b);
+    });
+
+    it('leaves isolated focus scrolling to CSS', () => {
+      const a = focusable({ x: 0, y: 0 });
+      const b = focusable({ x: 0, y: 100 });
+      const nav = new SpatialNav(makeContainer(a, b));
+      nav.focus(a);
+      nav.focus(b);
+      expect(b.scrollIntoView).toHaveBeenCalledWith(
+        expect.objectContaining({ behavior: 'auto' }),
+      );
+    });
+
+    it('forces only repeated focus changes to scroll instantly', () => {
+      applyAnimationMode('full');
+      const now = vi.spyOn(Date, 'now');
+      now.mockReturnValueOnce(1000)
+        .mockReturnValueOnce(1080)
+        .mockReturnValueOnce(1300);
+      const a = focusable({ x: 0, y: 0 });
+      const b = focusable({ x: 0, y: 100 });
+      const c = focusable({ x: 0, y: 200 });
+      const nav = new SpatialNav(makeContainer(a, b, c));
+
+      nav.focus(a);
+      nav.focus(b);
+      nav.focus(c);
+
+      expect(a.scrollIntoView).toHaveBeenCalledWith(
+        expect.objectContaining({ behavior: 'auto' }),
+      );
+      expect(b.scrollIntoView).toHaveBeenCalledWith(
+        expect.objectContaining({ behavior: 'instant' }),
+      );
+      expect(c.scrollIntoView).toHaveBeenCalledWith(
+        expect.objectContaining({ behavior: 'auto' }),
+      );
+      now.mockRestore();
     });
 
     it('skips scrollIntoView when re-focusing the already-focused element', () => {
@@ -94,6 +134,24 @@ describe('SpatialNav', () => {
       const nav = new SpatialNav(makeContainer(a));
       nav.focusBySelector('#target');
       expect(nav.focused).toBe(a);
+    });
+
+    it('focusContainerEntry enters at the first item and restores the last item', () => {
+      const outside = focusable({ x: 0, y: 0 });
+      const list = document.createElement('div');
+      list.className = 'list';
+      list.setAttribute('data-nav-container', '');
+      const first = focusable({ x: 200, y: 0 });
+      const second = focusable({ x: 200, y: 100 });
+      list.append(first, second);
+      const nav = new SpatialNav(makeContainer(outside, list));
+
+      expect(nav.focusContainerEntry('.list')).toBe(true);
+      expect(nav.focused).toBe(first);
+      nav.focus(second);
+      nav.focus(outside);
+      expect(nav.focusContainerEntry('.list')).toBe(true);
+      expect(nav.focused).toBe(second);
     });
   });
 

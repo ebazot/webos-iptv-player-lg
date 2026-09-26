@@ -31,6 +31,7 @@ vi.mock('../services/storage-service', () => ({ StorageService: storageMock }));
 vi.mock('./toast', () => ({ showToast: toastMock.showToast }));
 
 import { Movies } from './movies';
+import { VirtualGrid } from '../utils/virtual-grid';
 
 const account: PlaylistEntry = {
   id: 'x1', name: 'X', url: 'http://host:8080', source: 'xtream', xtream: { username: 'u', password: 'p' },
@@ -201,6 +202,53 @@ describe('Movies browse + grid', () => {
       .toBe('2821485px');
   });
 
+  // The grid virtualizer is only measured while rendering, so a call to
+  // getTotalSize is the observable trace of a full grid render.
+  const openGrid = async () => {
+    const streams = Array.from(
+      { length: 50 },
+      (_, index) => vod(String(index), `Movie ${String(index)}`, '7'),
+    );
+    const cats = Array.from(
+      { length: 7 },
+      (_, index) => ({ id: String(index + 1), name: `Cat ${String(index + 1)}` }),
+    );
+    const { view } = await openWith(cats, streams);
+    container.querySelector<HTMLElement>('.catalog-cat[data-category-id="7"]')!
+      .dispatchEvent(new CustomEvent('nav:hover', { bubbles: true }));
+    view.handleAction('select');
+    await Promise.resolve();
+    await Promise.resolve();
+    return view;
+  };
+
+  it('moves focus inside the window without re-rendering the grid', async () => {
+    const view = await openGrid();
+    const rendered = vi.spyOn(VirtualGrid.prototype, 'getTotalSize');
+    view.handleAction('right');
+    expect(rendered).not.toHaveBeenCalled();
+    expect(container.querySelector(
+      '[data-grid-index="1"] [data-focusable].focused',
+    )).not.toBeNull();
+    expect(container.querySelector(
+      '[data-grid-index="0"] [data-focusable].focused',
+    )).toBeNull();
+    rendered.mockRestore();
+  });
+
+  it('re-renders the grid once a focus move scrolls the window', async () => {
+    const view = await openGrid();
+    const rendered = vi.spyOn(VirtualGrid.prototype, 'getTotalSize');
+    view.handleAction('down');
+    expect(rendered).not.toHaveBeenCalled();
+    view.handleAction('down');
+    expect(rendered).toHaveBeenCalled();
+    expect(container.querySelector(
+      '[data-grid-index="14"] [data-focusable].focused',
+    )).not.toBeNull();
+    rendered.mockRestore();
+  });
+
   it('snaps free grid scrolling to the nearest row after it stops', async () => {
     const cats = Array.from(
       { length: 7 },
@@ -296,7 +344,8 @@ describe('Movies detail', () => {
   it('renders plot/meta and a Play button, and plays from the start', async () => {
     catalogMock.loadVodInfo.mockResolvedValue({
       plot: 'A plot.', cast: 'Actor A', director: 'Dir A', genre: 'Drama',
-      releaseDate: '2020-05-01', durationSecs: 3600, poster: 'http://host:8080/p.jpg', imdbId: '', tmdbId: '', year: 0,
+      releaseDate: '2020-05-01', durationSecs: 3600, poster: 'http://host:8080/p.jpg',
+      imdbId: '', tmdbId: '', year: 0,
     });
     const { view, handlers } = await openWith([{ id: '1', name: 'Cat A' }], [vod('10', 'Movie One')]);
     const tile = container.querySelector('.catalog-tile[data-item-id="10"]') as HTMLElement;

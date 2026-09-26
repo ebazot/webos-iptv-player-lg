@@ -13,37 +13,48 @@
 
 ## Screenshots
 
-| Channel list | Recently watched |
+| Channel list | Live preview |
 | --- | --- |
-| ![Channel list](https://github.com/user-attachments/assets/ec5dab43-3b1e-4b90-a20f-71514b8a605b) | ![Recently watched](https://github.com/user-attachments/assets/529c23e4-5fe4-4fbf-bae8-f62ce6008e33) |
+| ![Channel list](https://github.com/user-attachments/assets/adb1ff15-1da3-479f-8a2f-0486dca5b082) | ![Live preview](https://github.com/user-attachments/assets/a10915a7-cdea-4bfc-bb12-f6e3054b4b51) |
 
-| Program guide | Catch-up resume |
+| Recently watched | Program guide |
 | --- | --- |
-| ![Program guide](https://github.com/user-attachments/assets/9928c342-c2fa-46b8-92f1-b5e815f24f19) | ![Catch-up resume](https://github.com/user-attachments/assets/9a49fa89-b3ae-4b27-bcd6-b93de2c3e1e1) |
+| ![Recently watched](https://github.com/user-attachments/assets/ef7aa7a1-7c3e-4b59-8825-fe4a0a441a61) | ![Program guide](https://github.com/user-attachments/assets/9928c342-c2fa-46b8-92f1-b5e815f24f19) |
 
-| Channel info | Playback overlays |
+| Catch-up resume | Channel info |
 | --- | --- |
-| ![Channel info](https://github.com/user-attachments/assets/e0dd4fbf-b6b4-46f6-a8e8-7235c66d9512) | ![Playback overlays](https://github.com/user-attachments/assets/1a2a3fe7-55ca-4a7c-ac05-a38c4f578e41) |
+| ![Catch-up resume](https://github.com/user-attachments/assets/9a49fa89-b3ae-4b27-bcd6-b93de2c3e1e1) | ![Channel info](https://github.com/user-attachments/assets/9adf8302-750f-429b-9155-828c8c30f097) |
 
-| Subtitles | Subtitle search |
+| Playback overlays | Subtitles |
 | --- | --- |
-| ![Subtitles](https://github.com/user-attachments/assets/5d1fab57-1087-414b-9a20-f900589eac4a) | ![Subtitle search](https://github.com/user-attachments/assets/4ef9c97e-131b-4e4f-bf9a-c753d66f2956) |
+| ![Playback overlays](https://github.com/user-attachments/assets/1a2a3fe7-55ca-4a7c-ac05-a38c4f578e41) | ![Subtitles](https://github.com/user-attachments/assets/5d1fab57-1087-414b-9a20-f900589eac4a) |
 
-| Movies | Movie detail |
+| Subtitle search | Movies |
 | --- | --- |
-| ![Movies](https://github.com/user-attachments/assets/a6b09baf-0342-4e02-9d7e-5cf7677d1ecf) | ![Movie detail](https://github.com/user-attachments/assets/1380b0b2-680f-49bb-a470-336c9e14a54a) |
+| ![Subtitle search](https://github.com/user-attachments/assets/4ef9c97e-131b-4e4f-bf9a-c753d66f2956) | ![Movies](https://github.com/user-attachments/assets/a6b09baf-0342-4e02-9d7e-5cf7677d1ecf) |
 
-| Series detail | Search |
+| Movie detail | Series detail |
 | --- | --- |
-| ![Series detail](https://github.com/user-attachments/assets/e7bf3b55-3464-4c7a-966d-34ee432795e3) | ![Search](https://github.com/user-attachments/assets/8677ff38-b32d-44af-991b-ce40a7157e61) |
+| ![Movie detail](https://github.com/user-attachments/assets/1380b0b2-680f-49bb-a470-336c9e14a54a) | ![Series detail](https://github.com/user-attachments/assets/2962184e-cc95-455d-aea7-888ff3297dc4) |
 
-| Settings | Theme picker |
+| Search | Settings |
 | --- | --- |
-| ![Settings](https://github.com/user-attachments/assets/0813b5a4-41ce-4a13-b398-8e7bb213de64) | ![Theme picker](https://github.com/user-attachments/assets/90ecc674-1421-42a5-8c10-248697cce305) |
+| ![Search](https://github.com/user-attachments/assets/8677ff38-b32d-44af-991b-ce40a7157e61) | ![Settings](https://github.com/user-attachments/assets/dbb231fe-defa-480b-948f-9395c8ba0a79) |
 
-| Reminder manager | LAN setup |
+| Theme picker | Reminder manager |
 | --- | --- |
-| ![Reminder manager](https://github.com/user-attachments/assets/f48116a3-9553-4d22-b0b1-ebd09a477a5b) | ![LAN setup](https://github.com/user-attachments/assets/fda1f741-bf92-45fd-b7c5-e2ed555cdc92) |
+| ![Theme picker](https://github.com/user-attachments/assets/2e5ed981-c01b-48ab-a681-9a0ecd6431b8) | ![Reminder manager](https://github.com/user-attachments/assets/1d9bd762-def1-4e57-82cd-52eb70834b1a) |
+
+<table>
+  <tr>
+    <th width="50%">LAN setup</th>
+    <th width="50%"></th>
+  </tr>
+  <tr>
+    <td width="50%"><img src="https://github.com/user-attachments/assets/fda1f741-bf92-45fd-b7c5-e2ed555cdc92" alt="LAN setup"></td>
+    <td width="50%"></td>
+  </tr>
+</table>
 
 ## Features
 
@@ -59,6 +70,7 @@
 - **Channel health** — check live streams and mark them as healthy, suspect, or unavailable
 - **Reminders** — flag an upcoming program and get notified at air time, even with the app closed, to tune straight in
 - **Recently Watched** — return to recent live channels or resume partially watched catch-up programs
+- **Live preview** — keep live playback beside the channel list while browsing, with program info and quick controls
 - **Movies & Series** — browse an Xtream account's VOD catalogs, with Continue Watching and account-scoped Watchlist rails
 - **Automatic VOD queues** — continue through series episodes or remaining Watchlist movies, removing completed titles from the Watchlist
 - **Catch-up & Live DVR** — replay past programs, and pause / rewind / return to the live edge on live streams
@@ -215,6 +227,7 @@ scripts/tv.sh run 'uname -a'                     # Run a TV command over SSH
 scripts/tv.sh push ./file.txt /tmp/file.txt      # Copy a local file to the TV
 scripts/tv.sh pull /tmp/file.txt ./file.txt      # Copy a TV file to this computer
 scripts/tv.sh shell                              # Open an interactive SSH session
+scripts/tv.sh reboot                             # Reboot the TV through Luna
 TV_DEVICE=tv2 scripts/tv.sh logs                 # Select a non-default configured TV
 ```
 
@@ -244,8 +257,11 @@ Open with the **Blue** key or the **Settings** tab in the top bar. Sections:
 - **EPG time correction** — adjust each source independently in 15-minute steps.
 - **Program reminders** — open the date-grouped Reminder Manager to review or remove upcoming reminders.
 - **Appearance** — preview an app-wide color theme, choose Dark or Frosted player overlays, and adjust text from 80% to 150%.
-- **Playback** — toggle auto-play (resume last watched channel on launch).
+- **Playback** — toggle auto-play and Live preview, and choose whether Channel
+  Up/Down cycles the global list or stays within the active group, Favorites,
+  or playlist.
 - **Online Subtitles** — choose a preferred subtitle language and configure SubDL, OpenSubtitles, and Assrt credentials for online search.
+- **Advanced** — customize advanced interface, playback, and background refresh behavior.
 - **Data Management** — refresh data, clear caches or viewing lists, or reset the app.
 - **Save Changes** applies preferences and reloads playlist and guide data when their sources change. **Cancel** discards edits.
 

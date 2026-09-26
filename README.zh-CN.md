@@ -13,37 +13,48 @@
 
 ## 截图
 
-| 频道列表 | 最近观看 |
+| 频道列表 | 直播预览 |
 | --- | --- |
-| ![频道列表](https://github.com/user-attachments/assets/ec5dab43-3b1e-4b90-a20f-71514b8a605b) | ![最近观看](https://github.com/user-attachments/assets/529c23e4-5fe4-4fbf-bae8-f62ce6008e33) |
+| ![频道列表](https://github.com/user-attachments/assets/adb1ff15-1da3-479f-8a2f-0486dca5b082) | ![直播预览](https://github.com/user-attachments/assets/a10915a7-cdea-4bfc-bb12-f6e3054b4b51) |
 
-| 节目指南 | 回看续播 |
+| 最近观看 | 节目指南 |
 | --- | --- |
-| ![节目指南](https://github.com/user-attachments/assets/9928c342-c2fa-46b8-92f1-b5e815f24f19) | ![回看续播](https://github.com/user-attachments/assets/9a49fa89-b3ae-4b27-bcd6-b93de2c3e1e1) |
+| ![最近观看](https://github.com/user-attachments/assets/ef7aa7a1-7c3e-4b59-8825-fe4a0a441a61) | ![节目指南](https://github.com/user-attachments/assets/9928c342-c2fa-46b8-92f1-b5e815f24f19) |
 
-| 频道信息 | 播放浮层 |
+| 回看续播 | 频道信息 |
 | --- | --- |
-| ![频道信息](https://github.com/user-attachments/assets/e0dd4fbf-b6b4-46f6-a8e8-7235c66d9512) | ![播放浮层](https://github.com/user-attachments/assets/1a2a3fe7-55ca-4a7c-ac05-a38c4f578e41) |
+| ![回看续播](https://github.com/user-attachments/assets/9a49fa89-b3ae-4b27-bcd6-b93de2c3e1e1) | ![频道信息](https://github.com/user-attachments/assets/9adf8302-750f-429b-9155-828c8c30f097) |
 
-| 字幕 | 字幕搜索 |
+| 播放浮层 | 字幕 |
 | --- | --- |
-| ![字幕](https://github.com/user-attachments/assets/5d1fab57-1087-414b-9a20-f900589eac4a) | ![字幕搜索](https://github.com/user-attachments/assets/4ef9c97e-131b-4e4f-bf9a-c753d66f2956) |
+| ![播放浮层](https://github.com/user-attachments/assets/1a2a3fe7-55ca-4a7c-ac05-a38c4f578e41) | ![字幕](https://github.com/user-attachments/assets/5d1fab57-1087-414b-9a20-f900589eac4a) |
 
-| 电影 | 电影详情 |
+| 字幕搜索 | 电影 |
 | --- | --- |
-| ![电影](https://github.com/user-attachments/assets/a6b09baf-0342-4e02-9d7e-5cf7677d1ecf) | ![电影详情](https://github.com/user-attachments/assets/1380b0b2-680f-49bb-a470-336c9e14a54a) |
+| ![字幕搜索](https://github.com/user-attachments/assets/4ef9c97e-131b-4e4f-bf9a-c753d66f2956) | ![电影](https://github.com/user-attachments/assets/a6b09baf-0342-4e02-9d7e-5cf7677d1ecf) |
 
-| 剧集详情 | 搜索 |
+| 电影详情 | 剧集详情 |
 | --- | --- |
-| ![剧集详情](https://github.com/user-attachments/assets/e7bf3b55-3464-4c7a-966d-34ee432795e3) | ![搜索](https://github.com/user-attachments/assets/8677ff38-b32d-44af-991b-ce40a7157e61) |
+| ![电影详情](https://github.com/user-attachments/assets/1380b0b2-680f-49bb-a470-336c9e14a54a) | ![剧集详情](https://github.com/user-attachments/assets/2962184e-cc95-455d-aea7-888ff3297dc4) |
 
-| 设置 | 主题选择器 |
+| 搜索 | 设置 |
 | --- | --- |
-| ![设置](https://github.com/user-attachments/assets/0813b5a4-41ce-4a13-b398-8e7bb213de64) | ![主题选择器](https://github.com/user-attachments/assets/90ecc674-1421-42a5-8c10-248697cce305) |
+| ![搜索](https://github.com/user-attachments/assets/8677ff38-b32d-44af-991b-ce40a7157e61) | ![设置](https://github.com/user-attachments/assets/dbb231fe-defa-480b-948f-9395c8ba0a79) |
 
-| 节目提醒 | 局域网设置 |
+| 主题选择器 | 节目提醒 |
 | --- | --- |
-| ![节目提醒](https://github.com/user-attachments/assets/f48116a3-9553-4d22-b0b1-ebd09a477a5b) | ![局域网设置](https://github.com/user-attachments/assets/fda1f741-bf92-45fd-b7c5-e2ed555cdc92) |
+| ![主题选择器](https://github.com/user-attachments/assets/2e5ed981-c01b-48ab-a681-9a0ecd6431b8) | ![节目提醒](https://github.com/user-attachments/assets/1d9bd762-def1-4e57-82cd-52eb70834b1a) |
+
+<table>
+  <tr>
+    <th width="50%">局域网设置</th>
+    <th width="50%"></th>
+  </tr>
+  <tr>
+    <td width="50%"><img src="https://github.com/user-attachments/assets/fda1f741-bf92-45fd-b7c5-e2ed555cdc92" alt="局域网设置"></td>
+    <td width="50%"></td>
+  </tr>
+</table>
 
 ## 功能
 
@@ -59,6 +70,7 @@
 - **频道健康检查** — 检测直播流状态，并将频道标记为正常、可疑或不可用
 - **节目提醒** — 为即将播出的节目设置提醒；即使应用已经关闭，也能在开播时收到通知并直接切换至对应频道
 - **最近观看** — 快速返回最近收看的直播频道，或从上次进度继续播放回看节目
+- **直播预览** — 浏览频道列表时在右侧持续播放，并提供节目信息和快捷控制
 - **电影和剧集** — 浏览 Xtream 账号提供的视频点播（VOD）内容，并按账号分别维护“继续观看”和“稍后观看”列表
 - **视频点播自动连播队列** — 自动接续播放后续剧集或“稍后观看”中的电影，并在播放完成后将其移出列表
 - **回看与直播时移** — 播放已播出的节目；观看直播时可暂停、回退或一键返回直播点
@@ -209,14 +221,18 @@ scripts/tv.sh logs --app com.lennylxx.iptv       # 实时查看应用的 DevTool
 scripts/tv.sh eval 'document.visibilityState'    # 在应用页面中执行 JavaScript
 scripts/tv.sh perf --duration 30                 # 采样 CPU、堆、DOM 和布局
 scripts/tv.sh diag                               # 生成经过脱敏的诊断报告
+scripts/tv.sh capt screenshot screen.png         # 截取电视画面和应用 OSD
+scripts/tv.sh capt record screen.mp4             # 录制 10 秒电视画面，约 5 fps，无音频
 scripts/tv.sh run 'uname -a'                     # 通过 SSH 在电视上执行命令
 scripts/tv.sh push ./file.txt /tmp/file.txt      # 将本地文件复制到电视
+scripts/tv.sh pull /tmp/file.txt ./file.txt      # 将电视文件复制到本地
 scripts/tv.sh shell                              # 打开交互式 SSH 会话
+scripts/tv.sh reboot                             # 通过 Luna 重启电视
 TV_DEVICE=tv2 scripts/tv.sh logs                 # 选择非默认的已配置电视
 ```
 
-运行 `scripts/tv.sh perf --help` 或 `scripts/tv.sh diag --help`
-可查看数据采集和输出选项。
+运行 `scripts/tv.sh capt --help`、`scripts/tv.sh perf --help` 或
+`scripts/tv.sh diag --help` 可查看相关选项。
 
 ### 在浏览器中预览
 
@@ -243,8 +259,10 @@ mpegts.js 和 Shaka 播放相应格式的视频。
 - **EPG 时间校正** — 以 15 分钟为步长，分别校正各播放源的节目时间。
 - **节目提醒** — 打开按日期分组的节目提醒管理器，查看或移除尚未播出的提醒。
 - **外观** — 实时预览应用配色主题，选择深色或毛玻璃播放器浮层，并在 80%–150% 范围内调整文字大小。
-- **播放** — 控制是否在应用启动后自动播放上次观看的频道。
+- **播放** — 控制启动时自动播放和直播预览，并选择频道上/下键是在全局频道列表中
+  切换，还是限制在当前分组、收藏或播放列表内。
 - **在线字幕** — 选择首选字幕语言，并配置 SubDL、OpenSubtitles 和 Assrt 的在线搜索凭据。
+- **高级设置** — 自定义高级界面、播放和后台刷新行为。
 - **数据管理** — 刷新数据、清除缓存或观看记录，以及重置应用。
 - **保存更改**会应用当前设置；播放源发生变化时，还会重新加载播放列表和节目指南。选择**取消**则放弃本次修改。
 
