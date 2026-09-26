@@ -157,6 +157,7 @@ export const ZH_CN_MESSAGES = {
   'player.info.source': '地址',
   'player.info.drm': 'DRM',
   'player.info.bitrate': '码率',
+  'player.info.realtimeBitrate': '实时码率',
   'player.info.video': '视频',
   'player.info.resolution': '分辨率',
   'player.info.frameRate': '帧率',

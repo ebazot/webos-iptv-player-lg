@@ -302,6 +302,10 @@ export class PlayerOsd {
 
   refreshProgress(): void {
     if (!this.visible) return;
+    if (this.techOpen) {
+      this.render();
+      return;
+    }
     const state = this.callbacks.getSnapshot();
     const playback = state.playback;
     if (!playback) return;

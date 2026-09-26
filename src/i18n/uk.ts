@@ -166,6 +166,7 @@ export const UK_MESSAGES = {
   'player.info.source': 'Джерело',
   'player.info.drm': 'DRM',
   'player.info.bitrate': 'Бітрейт',
+  'player.info.realtimeBitrate': 'Бітрейт у реальному часі',
   'player.info.video': 'Відео',
   'player.info.resolution': 'Роздільна здатність',
   'player.info.frameRate': 'Частота кадрів',

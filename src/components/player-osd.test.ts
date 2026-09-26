@@ -385,6 +385,25 @@ describe('PlayerOsd', () => {
     expect(container.querySelector('.osd-tech')).toBeNull();
   });
 
+  it('displays active bitrate pill and technical tray row when available', () => {
+    state = snapshot({
+      playback: playback(120),
+      vodTitle: 'Video 1',
+      streamInfo: {
+        ...TECH_INFO,
+        bitrate: '4.8 Mbps',
+      },
+    });
+    osd.show();
+
+    const pills = container.querySelector('.osd-stream-info');
+    expect(pills?.textContent).toContain('4.8 Mbps');
+
+    osd.toggleTechDetails();
+    const tray = container.querySelector('.osd-tech')!;
+    expect(tray.querySelector('[data-key="tech:bitrate"]')?.textContent).toContain('4.8 Mbps');
+  });
+
   it('keeps a closed tray closed across shows and collapses it via Back-style close', () => {
     state = snapshot({ playback: playback(120), vodTitle: 'Video 1', streamInfo: TECH_INFO });
     osd.show();

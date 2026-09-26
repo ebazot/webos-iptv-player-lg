@@ -192,7 +192,7 @@ describe('channelLayoutLabel', () => {
   });
   it('returns "" for unknown or empty', () => {
     expect(channelLayoutLabel('')).toBe('');
-    expect(channelLayoutLabel('5')).toBe('');
+    expect(channelLayoutLabel('99')).toBe('');
     expect(channelLayoutLabel('JOC')).toBe('');
   });
 });

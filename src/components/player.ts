@@ -1132,9 +1132,11 @@ export class Player {
     const subtitleTracks = this.tracks.getSubtitleTracks();
     const audio = audioSummary(audioTracks);
     const subtitle = subtitleSummary(subtitleTracks);
-    // Bitrate: the engine's live level on the MSE path, else the matched master
-    // variant's nominal BANDWIDTH (native HLS). VOD has neither.
-    const bitrate = bitrateLabel(lvl?.bitrate ?? variant?.bandwidth ?? 0);
+    // Bitrate: real-time measured/estimated bitrate if available, else nominal level/variant bandwidth
+    const nominalBitrate = bitrateLabel(lvl?.bitrate ?? variant?.bandwidth ?? 0);
+    const realtimeBps = this.computeRealtimeBitrate(v, lvl?.realtimeBitrate);
+    const realtimeBitrate = bitrateLabel(realtimeBps);
+    const bitrate = realtimeBitrate || nominalBitrate;
     const channels = channelLayoutLabel(hlsChannels);
     const container = containerLabel(this.streamUrl());
     const size = v && v.videoWidth && v.videoHeight
@@ -1164,6 +1166,39 @@ export class Player {
       droppedFrames: this.droppedFrames(v),
       url: diagnosticStreamUrl(this.streamUrl()),
     };
+  }
+
+  private lastByteCheckTime = 0;
+  private lastByteCount = 0;
+  private liveBitrateBps = 0;
+
+  private computeRealtimeBitrate(v: HTMLVideoElement | null, pipelineBps?: number): number {
+    if (pipelineBps && pipelineBps > 0) {
+      return pipelineBps;
+    }
+    if (!v) return 0;
+    const now = performance.now();
+    const vDecoded = (v as any).webkitVideoDecodedByteCount || 0;
+    const aDecoded = (v as any).webkitAudioDecodedByteCount || 0;
+    const totalBytes = vDecoded + aDecoded;
+    if (totalBytes > 0 && this.lastByteCheckTime > 0) {
+      const elapsedSec = (now - this.lastByteCheckTime) / 1000;
+      if (elapsedSec >= 0.5) {
+        const bytesDiff = totalBytes - this.lastByteCount;
+        if (bytesDiff >= 0) {
+          const bps = (bytesDiff * 8) / elapsedSec;
+          this.liveBitrateBps = this.liveBitrateBps > 0
+            ? Math.round(this.liveBitrateBps * 0.7 + bps * 0.3)
+            : Math.round(bps);
+        }
+        this.lastByteCheckTime = now;
+        this.lastByteCount = totalBytes;
+      }
+    } else if (totalBytes > 0) {
+      this.lastByteCheckTime = now;
+      this.lastByteCount = totalBytes;
+    }
+    return this.liveBitrateBps;
   }
 
   /** The URL currently being played (catch-up rewritten, VOD item), for the
