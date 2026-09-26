@@ -40,7 +40,6 @@ export interface PlayerOsdStreamInfo {
   // feeds the expandable details tray (see renderTechDetails).
   container: string;
   bitrate: string;
-  realtimeBitrate: string;
   channels: string;
   size: string;
   videoToken: string;
@@ -446,7 +445,6 @@ export class PlayerOsd {
   // channels / audio / subtitle), shared by the Live and VOD OSD.
   private renderStreamInfo(info: PlayerOsdStreamInfo | null): Safe | string {
     if (!info) return '';
-    const activeBitrate = info.realtimeBitrate || info.bitrate;
     return html`
       <div class="osd-stream-info">
         ${info.resolution
@@ -456,7 +454,7 @@ export class PlayerOsd {
           : ''}
         ${info.hdr ? html`<span class="si-badge si-badge--hdr">${info.hdr}</span>` : ''}
         ${info.container ? html`<span class="si-pill">${info.container}</span>` : ''}
-        ${activeBitrate ? html`<span class="si-pill">${activeBitrate}</span>` : ''}
+        ${info.bitrate ? html`<span class="si-pill">${info.bitrate}</span>` : ''}
         ${info.fps ? html`<span class="si-pill">${info.fps}fps</span>` : ''}
         ${info.videoCodec ? html`<span class="si-pill">${info.videoCodec}</span>` : ''}
         ${info.audioCodec ? html`<span class="si-pill">${info.audioCodec}</span>` : ''}
@@ -492,7 +490,6 @@ export class PlayerOsd {
         ${this.techSection('stream', t('player.info.stream'), [
           this.techRow('container', t('player.info.container'), info?.container ?? ''),
           this.techRow('bitrate', t('player.info.bitrate'), info?.bitrate ?? ''),
-          this.techRow('realtimeBitrate', t('player.info.realtimeBitrate'), info?.realtimeBitrate ?? ''),
           this.techRow('drm', t('player.info.drm'), info?.drm ?? ''),
           this.techRow('url', t('player.info.source'), info?.url ?? ''),
         ])}

@@ -1132,11 +1132,11 @@ export class Player {
     const subtitleTracks = this.tracks.getSubtitleTracks();
     const audio = audioSummary(audioTracks);
     const subtitle = subtitleSummary(subtitleTracks);
-    // Bitrate: the engine's live level on the MSE path, else the matched master
-    // variant's nominal BANDWIDTH (native HLS). VOD has neither.
-    const bitrate = bitrateLabel(lvl?.bitrate ?? variant?.bandwidth ?? 0);
+    // Bitrate: real-time measured/estimated bitrate if available, else nominal level/variant bandwidth
+    const nominalBitrate = bitrateLabel(lvl?.bitrate ?? variant?.bandwidth ?? 0);
     const realtimeBps = this.computeRealtimeBitrate(v, lvl?.realtimeBitrate);
     const realtimeBitrate = bitrateLabel(realtimeBps);
+    const bitrate = realtimeBitrate || nominalBitrate;
     const channels = channelLayoutLabel(hlsChannels);
     const container = containerLabel(this.streamUrl());
     const size = v && v.videoWidth && v.videoHeight
@@ -1144,7 +1144,7 @@ export class Player {
       : info?.width && info?.height ? `${info.width}×${info.height}` : '';
     const audioLang = this.tracks.activeAudioLang();
     if (!(badge || hdr || drm || fps || vCodec || aCodec || audio || subtitle ||
-        container || bitrate || realtimeBitrate || channels)) return null;
+        container || bitrate || channels)) return null;
     return {
       resolution: badge,
       hdr,
@@ -1156,7 +1156,6 @@ export class Player {
       subtitle,
       container,
       bitrate,
-      realtimeBitrate,
       channels,
       size,
       videoToken: vToken,
