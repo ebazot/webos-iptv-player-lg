@@ -283,17 +283,21 @@ describe('Player catch-up seeking', () => {
     expect(player.canSeek()).toBe(true);
   });
 
-  it('Right seeks forward by the step, Left back; the bar + label follow', () => {
+  it('Right/Left actions do not seek, seekBy moves position and bar/label follow', () => {
+    player.handleAction('left');
     player.handleAction('right');
+    expect(video.currentTime).toBe(0);
+
+    player.seekBy(30);
     expect(video.currentTime).toBe(30);
     expect(bar().style.width).toBe('25%');
     expect(elapsed()).toBe('0:30');
 
-    player.handleAction('right');
+    player.seekBy(30);
     expect(video.currentTime).toBe(60);
     expect(bar().style.width).toBe('50%');
 
-    player.handleAction('left');
+    player.seekBy(-30);
     expect(video.currentTime).toBe(30);
   });
 
@@ -303,14 +307,14 @@ describe('Player catch-up seeking', () => {
     player.init(video);
     player.play(0, CATCHUP);
 
-    player.handleAction('right');
+    player.seekBy(30);
     expect(asyncVideo.requestedTime()).toBe(30);
     expect(elapsed()).toBe('0:30');
 
     video.dispatchEvent(new Event('timeupdate'));
     expect(elapsed()).toBe('0:30');
 
-    player.handleAction('right');
+    player.seekBy(30);
     expect(asyncVideo.requestedTime()).toBe(60);
     expect(bar().style.width).toBe('50%');
     expect(elapsed()).toBe('1:00');
@@ -326,9 +330,9 @@ describe('Player catch-up seeking', () => {
   });
 
   it('clamps seeks to [0, duration]', () => {
-    player.handleAction('left'); // 0 - 30 → 0
+    player.seekBy(-30); // 0 - 30 → 0
     expect(video.currentTime).toBe(0);
-    for (let i = 0; i < 5; i++) player.handleAction('right'); // 150 → clamp 120
+    for (let i = 0; i < 5; i++) player.seekBy(30); // 150 → clamp 120
     expect(video.currentTime).toBe(120);
   });
 
@@ -361,8 +365,7 @@ describe('Player catch-up seeking', () => {
   it('a d-pad press clears the cursor so OK pauses instead of seeking', () => {
     stubBar();
     container.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: 250, clientY: 18 }));
-    player.handleAction('right'); // d-pad seek clears the tracked cursor
-    expect(video.currentTime).toBe(30);
+    player.handleAction('up'); // d-pad action clears the tracked cursor
     player.handleAction('select');
     expect(video.paused).toBe(true); // paused (cursor cleared), not seeked to the stale pointer
   });
@@ -405,8 +408,7 @@ describe('Player catch-up pause/play', () => {
   });
 
   it('resyncAV seeks backward by RESYNC_SEEK_BACK to force a pipeline re-lock', () => {
-    player.handleAction('right'); // → 30
-    player.handleAction('right'); // → 60
+    player.seekBy(60); // → 60
     player.resyncAV();
     expect(video.currentTime).toBe(60 - CONFIG.PLAYER.RESYNC_SEEK_BACK);
   });
@@ -418,8 +420,7 @@ describe('Player catch-up pause/play', () => {
   });
 
   it('resyncAV debounces while a resync is already in flight', () => {
-    player.handleAction('right'); // → 30
-    player.handleAction('right'); // → 60
+    player.seekBy(60); // → 60
     player.resyncAV();            // → 59.5, now resyncing
     expect(video.currentTime).toBe(60 - CONFIG.PLAYER.RESYNC_SEEK_BACK);
     video.currentTime = 100;      // pretend playback advanced
@@ -436,8 +437,7 @@ describe('Player catch-up pause/play', () => {
   });
 
   it('a pointer click on the resync control seeks backward', () => {
-    player.handleAction('right'); // → 30
-    player.handleAction('right'); // → 60
+    player.seekBy(60); // → 60
     const btn = container.querySelector('[data-resync]') as HTMLElement;
     btn.getBoundingClientRect = () => ({ left: 900, right: 932, width: 32, top: 0, bottom: 32 }) as DOMRect;
     container.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: 916, clientY: 16 }));
@@ -884,14 +884,16 @@ describe('Player live DVR', () => {
     expect(container.querySelector('[data-resync]')).toBeNull();
   });
 
-  it('Left rewinds by the step, moving the bar', () => {
-    player.handleAction('left'); // 60 - 30 = 30
+  it('Left and Right do not seek, seekBy rewinds/fast-forwards moving the bar', () => {
+    player.handleAction('left');
+    expect(live.currentTime).toBe(60);
+    player.seekBy(-30); // 60 - 30 = 30
     expect(live.currentTime).toBe(30);
     expect((container.querySelector('.osd-progress-bar') as HTMLElement).style.width).toBe('50%');
   });
 
-  it('Right near the live edge snaps to the edge (end - pad)', () => {
-    player.handleAction('right'); // 60 + 30 → clamp 60 → snap 60 - PAD
+  it('seekBy near the live edge snaps to the edge (end - pad)', () => {
+    player.seekBy(30); // 60 + 30 → clamp 60 → snap 60 - PAD
     expect(live.currentTime).toBe(60 - PAD);
   });
 

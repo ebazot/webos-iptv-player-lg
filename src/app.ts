@@ -1343,24 +1343,6 @@ class App {
         this.search.handleAction(action);
         break;
       case 'player':
-        if (this.player.isVod()) {
-          // A VOD menu (opened by the pointer) captures D-pad nav; Left closes
-          // it. Otherwise D-pad drives VOD playback (seek / pause / OSD).
-          if (this.menu.visible) {
-            if (action === 'up' || action === 'down' || action === 'select') this.menu.handleAction(action);
-            else if (action === 'left') this.menu.hide();
-          } else {
-            this.player.handleAction(action, event);
-          }
-          break;
-        }
-        // While the OSD is up on seekable catch-up, Left/Right seek instead of
-        // opening the sidebar/menu (which stay reachable once the OSD hides).
-        if ((action === 'left' || action === 'right')
-            && !this.sidebar.visible && !this.menu.visible && this.player.canSeek()) {
-          this.player.handleAction(action, event);
-          break;
-        }
         if (action === 'left') {
           if (this.menu.visible) this.menu.hide();
           else if (this.sidebar.visible) this.sidebar.handleAction(action);

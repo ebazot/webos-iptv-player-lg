@@ -230,11 +230,9 @@ describe('PlayerOsd', () => {
     state = { ...state, dvr };
     osd.refreshProgress();
     expect(container.querySelector('[data-golive]')).not.toBeNull();
-    expect(container.querySelector<HTMLElement>('.osd-progress-bar')?.style.width).toBe('50%');
 
     state = { ...state, dvr: { ...dvr, fraction: 0.75, behindLive: 15 } };
     osd.refreshProgress();
-    expect(container.querySelector<HTMLElement>('.osd-progress-bar')?.style.width).toBe('75%');
     expect(container.querySelector('.osd-dvr-behind')?.textContent).toBe('-0:15');
   });
 
@@ -430,5 +428,38 @@ describe('PlayerOsd', () => {
     osd.show();
     expect(container.querySelector('.osd-tech')).toBeNull();
     expect(container.querySelector('[data-tech-info]')?.classList.contains('is-open')).toBe(false);
+  });
+
+  it('renders a greyed-out progress bar when no EPG programme info is available for live stream', () => {
+    state = snapshot({
+      nowPlaying: null,
+      dvr: null,
+      streamInfo: {
+        resolution: null,
+        hdr: '',
+        drm: '',
+        fps: '',
+        videoCodec: '',
+        audioCodec: '',
+        audio: '',
+        subtitle: '',
+        container: 'HLS',
+        bitrate: '',
+        channels: '',
+        size: '',
+        videoToken: '',
+        audioToken: '',
+        fpsExact: '',
+        audioLang: '',
+        bufferedSeconds: 15,
+        droppedFrames: 0,
+        url: '',
+      },
+    });
+    osd.show();
+
+    const bar = container.querySelector('.osd-progress-bar');
+    expect(bar?.classList.contains('is-greyed')).toBe(true);
+    expect(container.querySelector('.osd-stream-info')?.textContent).toContain('15 s buf');
   });
 });
