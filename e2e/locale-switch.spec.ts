@@ -17,6 +17,7 @@ test('switching through every language refreshes cached Recently Watched labels'
     ['it', 'Visti di recente'],
     ['pt-BR', 'Assistidos recentemente'],
     ['ru', 'Недавно просмотренные'],
+    ['tr', 'Son İzlenenler'],
     ['uk', 'Нещодавно переглянуті'],
     ['zh-CN', '最近观看'],
     ['en', 'Recently Watched'],

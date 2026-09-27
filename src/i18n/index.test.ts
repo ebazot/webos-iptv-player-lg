@@ -41,6 +41,8 @@ describe('i18n', () => {
     expect(resolveLocale('system', 'pt-PT')).toBe('pt-BR');
     expect(resolveLocale('system', 'ru-RU')).toBe('ru');
     expect(resolveLocale('system', 'ru-KZ')).toBe('ru');
+    expect(resolveLocale('system', 'tr-TR')).toBe('tr');
+    expect(resolveLocale('system', 'tr-CY')).toBe('tr');
     expect(resolveLocale('system', 'uk-UA')).toBe('uk');
     expect(resolveLocale('zh-CN', 'en-US')).toBe('zh-CN');
   });
@@ -54,6 +56,7 @@ describe('i18n', () => {
     expect(isLocalePreference('it')).toBe(true);
     expect(isLocalePreference('pt-BR')).toBe(true);
     expect(isLocalePreference('ru')).toBe(true);
+    expect(isLocalePreference('tr')).toBe(true);
     expect(isLocalePreference('uk')).toBe(true);
     expect(isLocalePreference('zh-CN')).toBe(true);
     expect(isLocalePreference('l1')).toBe(false);
@@ -69,6 +72,7 @@ describe('i18n', () => {
       { value: 'it', label: 'Italiano' },
       { value: 'pt-BR', label: 'Português (Brasil)' },
       { value: 'ru', label: 'Русский' },
+      { value: 'tr', label: 'Türkçe' },
       { value: 'uk', label: 'Українська' },
       { value: 'zh-CN', label: '简体中文' },
     ]);
@@ -101,6 +105,9 @@ describe('i18n', () => {
       tp('settings.refreshHours', 12),
       tp('settings.refreshHours', 24),
     ]).toEqual(['1 час', '3 часа', '6 часов', '12 часов', '24 часа']);
+    setLocale('tr');
+    expect(tp('settings.refreshHours', 1)).toBe('1 saat');
+    expect(tp('settings.refreshHours', 3)).toBe('3 saat');
     setLocale('uk');
     expect([
       tp('settings.refreshHours', 1),
@@ -133,6 +140,11 @@ describe('i18n', () => {
     expect(duration(2)).toBe('2 секунды');
     expect(duration(5)).toBe('5 секунд');
     expect(duration(1.2)).toBe('1,2 секунды');
+
+    setLocale('tr');
+    expect(duration(1)).toBe('1 saniye');
+    expect(duration(3)).toBe('3 saniye');
+    expect(duration(1.2)).toBe('1,2 saniye');
 
     setLocale('uk');
     expect(duration(1)).toBe('1 секунда');
@@ -197,6 +209,15 @@ describe('i18n', () => {
     expect(tp('channel.count', 22)).toBe('22 канала');
     expect(tp('app.channelsLoaded', 22)).toBe('Загружено 22 канала');
     expect(document.documentElement.lang).toBe('ru');
+  });
+
+  it('translates and interpolates Turkish messages', () => {
+    setLocale('tr');
+    expect(t('channel.recentlyWatched')).toBe('Son İzlenenler');
+    expect(tp('channel.count', 1)).toBe('1 kanal');
+    expect(tp('channel.count', 12)).toBe('12 kanal');
+    expect(tp('app.channelsLoaded', 12)).toBe('12 kanal yüklendi');
+    expect(document.documentElement.lang).toBe('tr');
   });
 
   it('translates and pluralizes Ukrainian messages', () => {
