@@ -11,6 +11,7 @@ import { DE_MESSAGES } from './de';
 import { ES_MESSAGES } from './es';
 import { FR_MESSAGES } from './fr';
 import { IT_MESSAGES } from './it';
+import { PL_MESSAGES } from './pl';
 import { PT_BR_MESSAGES } from './pt-BR';
 import { pseudoLocalize } from './pseudo';
 import { RU_MESSAGES } from './ru';
@@ -58,6 +59,12 @@ const LOCALES = {
     displayName: 'Italiano',
     systemExact: [],
     systemPrefixes: ['it'],
+  },
+  pl: {
+    messages: PL_MESSAGES,
+    displayName: 'Polski',
+    systemExact: [],
+    systemPrefixes: ['pl'],
   },
   'pt-BR': {
     messages: PT_BR_MESSAGES,

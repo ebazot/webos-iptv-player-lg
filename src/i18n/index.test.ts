@@ -37,6 +37,7 @@ describe('i18n', () => {
     expect(resolveLocale('system', 'fr-CA')).toBe('fr');
     expect(resolveLocale('system', 'it-IT')).toBe('it');
     expect(resolveLocale('system', 'it-CH')).toBe('it');
+    expect(resolveLocale('system', 'pl-PL')).toBe('pl');
     expect(resolveLocale('system', 'pt-BR')).toBe('pt-BR');
     expect(resolveLocale('system', 'pt-PT')).toBe('pt-BR');
     expect(resolveLocale('system', 'ru-RU')).toBe('ru');
@@ -54,6 +55,7 @@ describe('i18n', () => {
     expect(isLocalePreference('es')).toBe(true);
     expect(isLocalePreference('fr')).toBe(true);
     expect(isLocalePreference('it')).toBe(true);
+    expect(isLocalePreference('pl')).toBe(true);
     expect(isLocalePreference('pt-BR')).toBe(true);
     expect(isLocalePreference('ru')).toBe(true);
     expect(isLocalePreference('tr')).toBe(true);
@@ -70,6 +72,7 @@ describe('i18n', () => {
       { value: 'es', label: 'Español' },
       { value: 'fr', label: 'Français' },
       { value: 'it', label: 'Italiano' },
+      { value: 'pl', label: 'Polski' },
       { value: 'pt-BR', label: 'Português (Brasil)' },
       { value: 'ru', label: 'Русский' },
       { value: 'tr', label: 'Türkçe' },
@@ -94,6 +97,13 @@ describe('i18n', () => {
     setLocale('it');
     expect(tp('settings.refreshHours', 1)).toBe('1 ora');
     expect(tp('settings.refreshHours', 3)).toBe('3 ore');
+    setLocale('pl');
+    expect([
+      tp('settings.refreshHours', 1),
+      tp('settings.refreshHours', 2),
+      tp('settings.refreshHours', 5),
+      tp('settings.refreshHours', 22),
+    ]).toEqual(['1 godzina', '2 godziny', '5 godzin', '22 godziny']);
     setLocale('pt-BR');
     expect(tp('settings.refreshHours', 1)).toBe('1 hora');
     expect(tp('settings.refreshHours', 3)).toBe('3 horas');
@@ -134,6 +144,12 @@ describe('i18n', () => {
     setLocale('de');
     expect(duration(1)).toBe('1 Sekunde');
     expect(duration(1.2)).toBe('1,2 Sekunden');
+
+    setLocale('pl');
+    expect(duration(1)).toBe('1 sekunda');
+    expect(duration(2)).toBe('2 sekundy');
+    expect(duration(5)).toBe('5 sekund');
+    expect(duration(1.2)).toBe('1,2 sekundy');
 
     setLocale('ru');
     expect(duration(1)).toBe('1 секунда');
@@ -196,6 +212,18 @@ describe('i18n', () => {
     expect(t('channel.recentlyWatched')).toBe('Visti di recente');
     expect(tp('channel.count', 12)).toBe('12 canali');
     expect(document.documentElement.lang).toBe('it');
+  });
+
+  it('translates and pluralizes Polish messages', () => {
+    setLocale('pl');
+    expect(t('channel.recentlyWatched')).toBe('Ostatnio oglądane');
+    expect(tp('channel.count', 1)).toBe('1 kanał');
+    expect(tp('channel.count', 2)).toBe('2 kanały');
+    expect(tp('channel.count', 5)).toBe('5 kanałów');
+    expect(tp('channel.count', 12)).toBe('12 kanałów');
+    expect(tp('channel.count', 22)).toBe('22 kanały');
+    expect(tp('app.channelsLoaded', 22)).toBe('Wczytano 22 kanały');
+    expect(document.documentElement.lang).toBe('pl');
   });
 
   it('translates and interpolates Russian messages', () => {
