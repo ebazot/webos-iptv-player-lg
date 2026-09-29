@@ -17,6 +17,7 @@ import {
   xtreamCatchupSources as buildXtreamCatchupSources,
   xtreamCredentialsFromLiveUrl,
 } from '../utils/xtream-url';
+import { renderCatchupUrl } from '../utils/catchup-url';
 import { show, hide } from '../utils/dom';
 import { channelKey } from '../utils/channel';
 import { dvrWindow, dvrState, type DvrWindow } from '../utils/dvr';
@@ -463,10 +464,7 @@ export class Player {
             channel.catchupTimeOffsetMinutes,
           ));
       }
-      return source
-        .replace('{channel-id}', encodeURIComponent(channel.id || channel.name))
-        .replace('{utc}', String(catchup.start))
-        .replace('{utcend}', String(catchup.end));
+      return renderCatchupUrl(source, catchup.start, catchup.end, channel.id || channel.name);
     }
     return channel.url;
   }
@@ -863,6 +861,7 @@ export class Player {
   private loadStream(url: string, extras: Record<string, string> | null, opts?: { direct?: boolean }): void {
     this.tracks.resetForLoad();
     this.manifestVariants = [];
+    this.resetBitrateSampling();
     this.startupPending = true;
     this.startupWatchdog.stop();
     this.pipeline.load(url, extras, opts);
@@ -1248,6 +1247,10 @@ export class Player {
   private refreshProgress(): void {
     const v = this.videoEl;
     if (!v) return;
+    // Keep the decoded-byte samples coming even while the OSD is hidden: the
+    // real-time bitrate needs two samples half a second apart, so sampling only
+    // on demand would leave it at zero for the OSD's first frame.
+    this.sampleDecodedBitrate(v);
     // Throttled periodic catch-up checkpoint — runs regardless of OSD visibility
     // so progress is saved even when the OSD has auto-hidden.
     if (this.catchupInfo) {
@@ -1337,29 +1340,38 @@ export class Player {
     if (pipelineBps && pipelineBps > 0) {
       return pipelineBps;
     }
-    if (!v) return 0;
+    this.sampleDecodedBitrate(v);
+    return this.liveBitrateBps;
+  }
+
+  private resetBitrateSampling(): void {
+    this.lastByteCheckTime = 0;
+    this.lastByteCount = 0;
+    this.liveBitrateBps = 0;
+  }
+
+  // Native (non-MSE) playback exposes no level metadata, so derive the bitrate
+  // from the element's decoded-byte counters, smoothed to keep the pill steady.
+  private sampleDecodedBitrate(v: HTMLVideoElement | null): void {
+    if (!v) return;
     const now = performance.now();
     const vDecoded = (v as any).webkitVideoDecodedByteCount || 0;
     const aDecoded = (v as any).webkitAudioDecodedByteCount || 0;
     const totalBytes = vDecoded + aDecoded;
-    if (totalBytes > 0 && this.lastByteCheckTime > 0) {
-      const elapsedSec = (now - this.lastByteCheckTime) / 1000;
-      if (elapsedSec >= 0.5) {
-        const bytesDiff = totalBytes - this.lastByteCount;
-        if (bytesDiff >= 0) {
-          const bps = (bytesDiff * 8) / elapsedSec;
-          this.liveBitrateBps = this.liveBitrateBps > 0
-            ? Math.round(this.liveBitrateBps * 0.7 + bps * 0.3)
-            : Math.round(bps);
-        }
-        this.lastByteCheckTime = now;
-        this.lastByteCount = totalBytes;
-      }
-    } else if (totalBytes > 0) {
+    if (totalBytes <= 0) return;
+    if (this.lastByteCheckTime === 0 || totalBytes < this.lastByteCount) {
       this.lastByteCheckTime = now;
       this.lastByteCount = totalBytes;
+      return;
     }
-    return this.liveBitrateBps;
+    const elapsedSec = (now - this.lastByteCheckTime) / 1000;
+    if (elapsedSec < 0.5) return;
+    const bps = ((totalBytes - this.lastByteCount) * 8) / elapsedSec;
+    this.liveBitrateBps = this.liveBitrateBps > 0
+      ? Math.round(this.liveBitrateBps * 0.7 + bps * 0.3)
+      : Math.round(bps);
+    this.lastByteCheckTime = now;
+    this.lastByteCount = totalBytes;
   }
 
   /** The URL currently being played (catch-up rewritten, VOD item), for the

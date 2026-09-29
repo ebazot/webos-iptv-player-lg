@@ -93,6 +93,8 @@ export class EpgGrid {
   private channelSearchResultQuery = '';
   private channelSearchPending = false;
   private channelSearchGeneration = 0;
+  private dateOptionsRevision = -1;
+  private dateOptions: Date[] = [];
   private readonly channelSearch = new WorkerListSearch(
     'epg-grid',
     'names',
@@ -170,6 +172,8 @@ export class EpgGrid {
   }
 
   private getDateOptions(): Date[] {
+    const revision = EpgService.mappingRevision;
+    if (revision === this.dateOptionsRevision) return this.dateOptions;
     // Day columns span the earliest..latest program START. Using start (not
     // stop) means a program that merely runs past midnight doesn't add an
     // empty day column for the day it spills into — it belongs to its start day.
@@ -182,7 +186,11 @@ export class EpgGrid {
       if (first < minStart) minStart = first;
       if (last > maxStart) maxStart = last;
     }
-    if (minStart === Infinity) return [];
+    if (minStart === Infinity) {
+      this.dateOptionsRevision = revision;
+      this.dateOptions = [];
+      return this.dateOptions;
+    }
 
     const firstDay = startOfDisplayDay(new Date(minStart));
     const lastDay = startOfDisplayDay(new Date(maxStart));
@@ -193,7 +201,9 @@ export class EpgGrid {
       opts.push(cur);
       cur = addDisplayDays(cur, 1);
     }
-    return opts;
+    this.dateOptionsRevision = revision;
+    this.dateOptions = opts;
+    return this.dateOptions;
   }
 
   private findTodayIndex(options: Date[]): number {

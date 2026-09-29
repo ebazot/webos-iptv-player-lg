@@ -315,6 +315,7 @@ export class PlayerOsd {
       return;
     }
     const state = this.callbacks.getSnapshot();
+    if (!this.refreshStreamInfo(state.streamInfo)) { this.render(); return; }
     const playback = state.playback;
     if (!playback) return;
     if (state.vodTitle !== null) {
@@ -465,8 +466,11 @@ export class PlayerOsd {
   // channels / audio / subtitle), shared by the Live and VOD OSD.
   private renderStreamInfo(info: PlayerOsdStreamInfo | null): Safe | string {
     if (!info) return '';
+    return html`<div class="osd-stream-info">${this.streamInfoPills(info)}</div>`;
+  }
+
+  private streamInfoPills(info: PlayerOsdStreamInfo): Safe {
     return html`
-      <div class="osd-stream-info">
         ${info.resolution
           ? html`<span class="si-badge si-badge--${info.resolution.tier}">${
               info.resolution.label
@@ -483,8 +487,18 @@ export class PlayerOsd {
         ${info.drm ? html`<span class="si-pill">${info.drm}</span>` : ''}
         ${info.audio ? html`<span class="si-text">${audioTrackText(info.audio)}</span>` : ''}
         ${info.subtitle ? html`<span class="si-text">${t('player.subtitlesTrack', { name: info.subtitle })}</span>` : ''}
-      </div>
     `;
+  }
+
+  // Measured values (bitrate, buffer, dropped frames) only settle a beat after the
+  // OSD opens, so patch the pills in place on every tick instead of freezing the
+  // readout taken at show() time. Returns false when the row itself has to appear
+  // or disappear, which needs a full render.
+  private refreshStreamInfo(info: PlayerOsdStreamInfo | null): boolean {
+    const row = $('.osd-stream-info', this.container) as HTMLElement | null;
+    if (!row || !info) return !row && !info;
+    morph(row, this.streamInfoPills(info));
+    return true;
   }
 
   /** The ⓘ button that toggles the technical-details tray (Yellow too). */

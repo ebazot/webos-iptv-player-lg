@@ -829,7 +829,7 @@ export class ChannelList {
     if (!ch.logo) {
       logo = html`<div class="channel-logo-placeholder">${ch.name.charAt(0)}</div>`;
     } else if (!this.failedLogos.has(ch.logo)) {
-      logo = html`<img class="channel-logo" src="${ch.logo}" alt="" loading="lazy">`;
+      logo = html`<img class="channel-logo" src="${ch.logo}" alt="">`;
     }
 
     return html`
@@ -870,7 +870,7 @@ export class ChannelList {
     if (rawGroupPosition !== undefined) {
       const next = parseInt(rawGroupPosition, 10) + delta;
       const groups = this.getGroupEntries();
-      if (next < 0 || next >= groups.length) return false;
+      if (next < 0 || next >= groups.length) return true;
       const selector = `[data-group-position="${String(next)}"]`;
       const renderedTarget = this.container.querySelector<HTMLElement>(selector);
       if (renderedTarget && this.groupScrollFrame === null) {
@@ -896,7 +896,7 @@ export class ChannelList {
       this.currentPlaylist || undefined,
     );
     const next = position + delta;
-    if (next < 0 || next >= count) return false;
+    if (next < 0 || next >= count) return true;
     const selector = `[data-list-position="${String(next)}"]`;
     const renderedTarget = this.container.querySelector<HTMLElement>(selector);
     if (renderedTarget && this.scrollFrame === null) {

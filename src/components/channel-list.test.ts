@@ -602,6 +602,7 @@ describe('ChannelList.render', () => {
       list.render();
       const logo = container.querySelector<HTMLImageElement>('.channel-logo');
       expect(logo).not.toBeNull();
+      expect(logo!.hasAttribute('loading')).toBe(false);
 
       logo!.dispatchEvent(new Event('error'));
       const failedRow = channelItems()[0];
@@ -674,6 +675,15 @@ describe('ChannelList interaction', () => {
 
     expect(list.handleAction('up')).toBe(false);
     expect(channelItems()[0].classList.contains('focused')).toBe(true);
+  });
+
+  it('keeps focus on the last channel when moving down at the list edge', () => {
+    list.handleAction('down');
+    list.handleAction('down');
+
+    expect(list.handleAction('down')).toBe(true);
+    expect(channelItems()[2].classList.contains('focused')).toBe(true);
+    expect(container.querySelector('.group-item.focused')).toBeNull();
   });
 
   it('moves horizontally within the source list without jumping regions', () => {

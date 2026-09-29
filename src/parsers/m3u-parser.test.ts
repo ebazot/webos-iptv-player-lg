@@ -88,6 +88,35 @@ describe('parseM3U', () => {
     expect(channel.catchupSources).toBeUndefined();
   });
 
+  it('expands append, shift, and flussonic catch-up modes', () => {
+    const m3u = [
+      '#EXTM3U',
+      '#EXTINF:-1 catchup="append" catchup-source="?utc={utc}&lutc={lutc}",Alpha',
+      'http://host/a.m3u8',
+      '#EXTINF:-1 catchup="shift",Bravo',
+      'http://host/b.m3u8?token=t',
+      '#EXTINF:-1 catchup="flussonic",Charlie',
+      'http://host/ch3/index.m3u8?token=t',
+    ].join('\n');
+    const [a, b, c] = parseM3U(m3u).channels;
+    expect(a.catchupSource).toBe('http://host/a.m3u8?utc={utc}&lutc={lutc}');
+    expect(b.catchupSource).toBe('http://host/b.m3u8?token=t&utc={utc}&lutc={lutc}');
+    expect(c.catchupSource).toBe('http://host/ch3/index-{utc}-{duration}.m3u8?token=t');
+  });
+
+  it('applies catch-up defaults from the #EXTM3U header', () => {
+    const m3u = [
+      '#EXTM3U catchup="default" catchup-source="http://host/archive/{utc}" catchup-days="5"',
+      '#EXTINF:-1,Alpha',
+      'http://host/a',
+      '#EXTINF:-1 catchup="shift" catchup-days="2",Bravo',
+      'http://host/b',
+    ].join('\n');
+    const [a, b] = parseM3U(m3u).channels;
+    expect(a).toMatchObject({ catchupSource: 'http://host/archive/{utc}', catchupDays: 5 });
+    expect(b).toMatchObject({ catchupSource: 'http://host/b?utc={utc}&lutc={lutc}', catchupDays: 2 });
+  });
+
   it('matches attribute names without regard to case', () => {
     const m3u = [
       '#EXTM3U X-TVG-URL="http://host/guide.xml"',

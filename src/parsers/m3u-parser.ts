@@ -9,6 +9,7 @@ import {
   xtreamCatchupSource,
   xtreamCredentialsFromLiveUrl,
 } from '../utils/xtream-url';
+import { resolveCatchupSource } from '../utils/catchup-url';
 import { isMpdText } from '../utils/url';
 
 export interface M3UParseOptions {
@@ -363,6 +364,7 @@ export class M3UStreamParser {
     }
     if (!this.current) this.current = emptyChannel(nameFromUrl(line));
     this.current.url = line;
+    this.applyCatchup(this.current);
     if (this.current.catchup.toLowerCase() === 'xc' && !this.current.catchupSource) {
       const inferred = xtreamCredentialsFromLiveUrl(line);
       if (inferred) {
@@ -404,6 +406,22 @@ export class M3UStreamParser {
       );
       this.stopped = true;
     }
+  }
+
+  private applyCatchup(channel: Channel): void {
+    const header = this.headerAttributes;
+    if (!channel.catchup && !channel.catchupSource) {
+      channel.catchup = header.catchup || header['catchup-type'] || '';
+      channel.catchupSource = header['catchup-source'] || '';
+    }
+    if (!channel.catchupDays) {
+      channel.catchupDays = parseInt(header['catchup-days'] || header['tvg-rec'] || '0', 10) || 0;
+    }
+    channel.catchupSource = resolveCatchupSource(
+      channel.catchup,
+      channel.catchupSource,
+      channel.url,
+    );
   }
 
   private pendingChannelName(): string {
