@@ -11,9 +11,11 @@ import { DE_MESSAGES } from './de';
 import { ES_MESSAGES } from './es';
 import { FR_MESSAGES } from './fr';
 import { IT_MESSAGES } from './it';
+import { PL_MESSAGES } from './pl';
 import { PT_BR_MESSAGES } from './pt-BR';
 import { pseudoLocalize } from './pseudo';
 import { RU_MESSAGES } from './ru';
+import { TR_MESSAGES } from './tr';
 import { UK_MESSAGES } from './uk';
 import { ZH_CN_MESSAGES } from './zh-CN';
 
@@ -58,6 +60,12 @@ const LOCALES = {
     systemExact: [],
     systemPrefixes: ['it'],
   },
+  pl: {
+    messages: PL_MESSAGES,
+    displayName: 'Polski',
+    systemExact: [],
+    systemPrefixes: ['pl'],
+  },
   'pt-BR': {
     messages: PT_BR_MESSAGES,
     displayName: 'Português (Brasil)',
@@ -69,6 +77,12 @@ const LOCALES = {
     displayName: 'Русский',
     systemExact: [],
     systemPrefixes: ['ru'],
+  },
+  tr: {
+    messages: TR_MESSAGES,
+    displayName: 'Türkçe',
+    systemExact: [],
+    systemPrefixes: ['tr'],
   },
   uk: {
     messages: UK_MESSAGES,
